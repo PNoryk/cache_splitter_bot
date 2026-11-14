@@ -3,7 +3,7 @@ main = "platform/worker.js"
 compatibility_date = "2026-11-01"
 
 [vars]
-BOT_USERNAME = "cash_splitter_bot"
+BOT_USERNAME = "cash_splitter_p_bot"
 
 [[d1_databases]]
 binding = "DB"
