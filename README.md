@@ -39,6 +39,18 @@ Telegram-бот для группового чата: считает, кто к�
    set -a; . ./.dev.vars; set +a; npm run set-commands
    ```
 
+## Автодеплой
+
+`.github/workflows/deploy.yml`: при пуше в `main` — тесты, миграции D1, `wrangler deploy`.
+Настройка один раз:
+
+1. Cloudflare → My Profile → API Tokens → шаблон «Edit Cloudflare Workers», добавить право
+   Account · D1 · Edit.
+2. GitHub → Settings → Environments → `production`: Deployment branches — только `main`.
+3. В этом environment секреты `CLOUDFLARE_API_TOKEN` и `CLOUDFLARE_ACCOUNT_ID`.
+
+`BOT_TOKEN` и `WEBHOOK_SECRET` в GitHub не нужны: они в секретах воркера, деплой их не меняет.
+
 ## Локальная разработка
 
 - `npm test`
