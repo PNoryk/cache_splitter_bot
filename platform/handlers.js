@@ -2,7 +2,7 @@
  * Telegram update handling: /game, joining, rebuys, undo, guests, stack counting, settlement.
  */
 import {
-  markUpdate, findOpenGame, createGame, setMessageId, loadGame, addPlayer, addEntry,
+  markUpdate, findOpenGame, createGame, setMessageId, loadGame, addPlayer, renamePlayer, addEntry,
   cancelEntry, setStatus, cancelGame, setPrice, upsertStack, findGameByCountMessage, findCountingGameForDm,
 } from './db.js';
 import {
@@ -18,6 +18,7 @@ import {
 
 /**
  * @typedef {import('../core/types.js').GameSnapshot} GameSnapshot
+ * @typedef {import('../core/types.js').Player} Player
  * @typedef {{call: (method: string, params?: object) => Promise<any>}} Api
  * @typedef {{db: any, api: Api, botUsername: string}} Ctx
  * @typedef {{id: number, first_name?: string, last_name?: string, is_bot?: boolean}} TgUser
@@ -91,20 +92,45 @@ async function answer(ctx, cq, text) {
 }
 
 /**
+ * First free name among the active players: the name itself, else with
+ * " 2", " 3", ... (the base is trimmed so the result fits MAX_NAME).
+ * @param {string} name
+ * @param {Player[]} others active players the name must differ from
+ * @returns {string}
+ */
+function uniqueName(name, others) {
+  const taken = new Set(others.map((p) => nameKey(p.name)));
+  if (!taken.has(nameKey(name))) return name;
+  for (let n = 2; ; n += 1) {
+    const suffix = ` ${n}`;
+    const candidate = `${name.slice(0, MAX_NAME - suffix.length).trimEnd()}${suffix}`;
+    if (!taken.has(nameKey(candidate))) return candidate;
+  }
+}
+
+/**
  * Join the user to the game; sends nothing. A player who left (no active
- * entries) rejoins with a new buyin.
+ * entries) rejoins with a new buyin. A name equal to an active player's gets
+ * a numeric suffix, so "Имя число" stays unambiguous.
  * @param {Ctx} ctx
  * @param {number} gameId
  * @param {TgUser} from
  * @returns {Promise<JoinResult>}
  */
 async function joinUser(ctx, gameId, from) {
+  const before = await loadGame(ctx.db, gameId);
+  const active = before ? activePlayers(before) : [];
   const res = await addPlayer(ctx.db, gameId, {
-    tgUserId: from.id, name: displayName(from), addedBy: from.id,
+    tgUserId: from.id, name: uniqueName(displayName(from), active), addedBy: from.id,
   });
   if (res.created) return 'created';
   const g = await loadGame(ctx.db, gameId);
   if (g && buyinsOf(g, res.playerId) > 0) return 'existing';
+  const me = g && g.players.find((p) => p.id === res.playerId);
+  if (g && me) {
+    const name = uniqueName(me.name, activePlayers(g));
+    if (name !== me.name) await renamePlayer(ctx.db, me.id, name);
+  }
   const added = await addEntry(ctx.db, gameId, res.playerId, 'buyin', from.id);
   return added ? 'rejoined' : 'closed';
 }

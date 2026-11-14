@@ -194,6 +194,17 @@ export async function addPlayer(db, gameId, { tgUserId, name, addedBy }) {
 }
 
 /**
+ * Rename a player.
+ * @param {any} db D1Database
+ * @param {number} playerId
+ * @param {string} name
+ * @returns {Promise<void>}
+ */
+export async function renamePlayer(db, playerId, name) {
+  await db.prepare('UPDATE players SET name = ? WHERE id = ?').bind(name, playerId).run();
+}
+
+/**
  * Add a buyin/rebuy entry while the game is active or counting.
  * @param {any} db D1Database
  * @param {number} gameId

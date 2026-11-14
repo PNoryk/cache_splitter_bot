@@ -376,3 +376,56 @@ test('a stack above 1e9 chips is not accepted', async () => {
   );
   assert.equal((await loadGame(w.db, id)).stacks.length, 0);
 });
+
+const D = { id: 5, first_name: 'Дима' };
+const D2 = { id: 6, first_name: 'дима' };
+const SA = { id: 7, first_name: 'Саша' };
+
+test('Telegram user named like a guest gets a numbered name; both stacks enterable', async () => {
+  const w = world();
+  const id = await startGame(w, P);
+  await join(w, id, [P]);
+  await guest(w, id, 'Дима', P);
+  await join(w, id, [D]);
+  let g = await loadGame(w.db, id);
+  assert.deepEqual(g.players.map((p) => p.name), ['Паша', 'Дима', 'Дима 2']);
+  await handleUpdate(press(w.uid(), `${id}:end`, P), w.ctx);
+  await stack(w, id, '2200', P);
+  await stack(w, id, 'Дима 500', P);
+  await stack(w, id, 'Дима 2 300', P);
+  g = await loadGame(w.db, id);
+  assert.equal(g.status, 'settled');
+});
+
+test('a second collision gets the next free number', async () => {
+  const w = world();
+  const id = await startGame(w, P);
+  await join(w, id, [P]);
+  await guest(w, id, 'Дима', P);
+  await join(w, id, [D, D2]);
+  const g = await loadGame(w.db, id);
+  assert.deepEqual(g.players.map((p) => p.name), ['Паша', 'Дима', 'Дима 2', 'дима 3']);
+});
+
+test('a long name is trimmed so the suffix fits', async () => {
+  const w = world();
+  const id = await startGame(w, P);
+  const long = 'Ж'.repeat(32);
+  await guest(w, id, long, P);
+  await join(w, id, [{ id: 8, first_name: long }]);
+  const g = await loadGame(w.db, id);
+  assert.equal(g.players[1].name, `${'Ж'.repeat(30)} 2`);
+  assert.equal(g.players[1].name.length, 32);
+});
+
+test('rejoin that now collides with a guest is renamed', async () => {
+  const w = world();
+  const id = await startGame(w, P);
+  await join(w, id, [P, SA]);
+  await handleUpdate(press(w.uid(), `${id}:undo`, SA), w.ctx);
+  await guest(w, id, 'Саша', P);
+  await join(w, id, [SA]);
+  const g = await loadGame(w.db, id);
+  assert.deepEqual(g.players.map((p) => p.name), ['Паша', 'Саша 2', 'Саша']);
+  assert.equal(g.players[1].tgUserId, SA.id);
+});
