@@ -54,7 +54,7 @@ export function minTransfers(balances) {
   if (n > EXACT_LIMIT) return greedy(nz, balances);
 
   const size = 1 << n;
-  const sum = new Int32Array(size);
+  const sum = new Float64Array(size);
   const dp = new Int8Array(size);
   for (let mask = 1; mask < size; mask++) {
     const low = 31 - Math.clz32(mask & -mask);

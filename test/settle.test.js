@@ -145,3 +145,9 @@ test('15 nonzero balances are fast', () => {
   assertSettles(balances, transfers);
   assert.ok(ms < 50, `took ${ms} ms`);
 });
+
+test('subset sums beyond 32 bits stay exact', () => {
+  const t = minTransfers([2147483648, 2147483648, -4294967296]);
+  assert.equal(t.length, 2);
+  assert.deepEqual(t.map((x) => x.kop).sort(), [2147483648, 2147483648]);
+});
