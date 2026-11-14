@@ -6,6 +6,7 @@ import {
   cancelEntry,
 } from './db.js';
 import { gameView, personalView, rebuyChooserView, parseCb, ACTIONS } from './views.js';
+import { TelegramError } from './telegram.js';
 import { parseGameArgs, rebuyTargets, undoTarget } from '../core/game.js';
 
 /**
@@ -18,6 +19,7 @@ import { parseGameArgs, rebuyTargets, undoTarget } from '../core/game.js';
 
 const MAX_NAME = 32;
 const GUEST_PROMPT_PREFIX = 'Имя гостя для игры #';
+const COUNTING_TEXT = 'Идёт подсчёт — сначала «Вернуться в игру»';
 const ENDED_TEXT = 'Игра уже закончена';
 const GAME_HINT = 'Чтобы начать игру, напишите: /game 1000 50\n'
   + '(фишек в одном закупе и цена закупа)';
@@ -120,7 +122,8 @@ async function cmdGame(ctx, msg, args) {
   let id;
   try {
     id = await createGame(ctx.db, { chatId, ...parsed, createdBy: msg.from.id });
-  } catch {
+  } catch (e) {
+    if (!/UNIQUE constraint failed/i.test(String(e && /** @type {any} */ (e).message))) throw e;
     return already();
   }
   const g = /** @type {GameSnapshot} */ (await loadGame(ctx.db, id));
@@ -150,10 +153,10 @@ async function cmdStart(ctx, msg, args) {
     await ctx.api.call('sendMessage', { chat_id: msg.chat.id, text: ENDED_TEXT });
     return;
   }
-  await joinUser(ctx, gameId, msg.from);
+  const created = await joinUser(ctx, gameId, msg.from);
   const g = /** @type {GameSnapshot} */ (await loadGame(ctx.db, gameId));
   await ctx.api.call('sendMessage', { chat_id: msg.chat.id, ...personalView(g) });
-  await refreshGameMessage(ctx, gameId);
+  if (created) await refreshGameMessage(ctx, gameId);
 }
 
 /** @type {Record<string, (ctx: Ctx, msg: any, args: string) => Promise<void>>} */
@@ -237,11 +240,17 @@ async function cbRebuy({ ctx, cq, g }) {
 async function cbRb({ ctx, cq, g, arg }) {
   const target = rebuyTargets(g, cq.from.id).find((p) => String(p.id) === arg);
   if (!target) return answer(ctx, cq, 'Нельзя докупить за этого игрока');
+  // Deleting the chooser is the lock: a repeated press finds it already gone.
+  try {
+    await ctx.api.call('deleteMessage', {
+      chat_id: cq.message.chat.id, message_id: cq.message.message_id,
+    });
+  } catch (e) {
+    if (!(e instanceof TelegramError)) throw e;
+    return answer(ctx, cq);
+  }
   await addEntry(ctx.db, g.id, target.id, 'rebuy', cq.from.id);
   await answer(ctx, cq);
-  await ctx.api.call('deleteMessage', {
-    chat_id: cq.message.chat.id, message_id: cq.message.message_id,
-  });
   await refreshGameMessage(ctx, g.id);
 }
 
@@ -268,21 +277,25 @@ async function cbGuest({ ctx, cq, g }) {
   await ctx.api.call('sendMessage', {
     chat_id: cq.message.chat.id,
     text: `${GUEST_PROMPT_PREFIX}${g.id}? Ответьте на это сообщение.`,
-    reply_markup: { force_reply: true, selective: true },
+    reply_markup: { force_reply: true, input_field_placeholder: 'Имя гостя' },
   });
 }
 
 /**
- * Callback handlers by action; each requires an active game. Later tasks add
- * their own tables and merge them in the router.
- * @type {Record<string, (c: CbCall) => Promise<void>>}
+ * @typedef {{handler: (c: CbCall) => Promise<void>, statuses: string[]}} CbEntry
  */
-const ACTIVE_ACTIONS = {
-  [ACTIONS.join]: cbJoin,
-  [ACTIONS.rebuy]: cbRebuy,
-  [ACTIONS.rb]: cbRb,
-  [ACTIONS.undo]: cbUndo,
-  [ACTIONS.guest]: cbGuest,
+
+/**
+ * Callback actions with the game statuses they are allowed in. Later tasks
+ * register their own entries (e.g. ['counting'], ['active', 'counting']).
+ * @type {Record<string, CbEntry>}
+ */
+const CALLBACKS = {
+  [ACTIONS.join]: { handler: cbJoin, statuses: ['active'] },
+  [ACTIONS.rebuy]: { handler: cbRebuy, statuses: ['active'] },
+  [ACTIONS.rb]: { handler: cbRb, statuses: ['active'] },
+  [ACTIONS.undo]: { handler: cbUndo, statuses: ['active'] },
+  [ACTIONS.guest]: { handler: cbGuest, statuses: ['active'] },
 };
 
 /**
@@ -293,11 +306,14 @@ const ACTIVE_ACTIONS = {
  */
 async function handleCallback(ctx, cq) {
   const parsed = parseCb(cq.data);
-  const handler = parsed && ACTIVE_ACTIONS[parsed.action];
-  if (!parsed || !handler || !cq.message) return answer(ctx, cq);
+  const entry = parsed && CALLBACKS[parsed.action];
+  if (!parsed || !entry || !cq.message) return answer(ctx, cq);
   const g = await loadGame(ctx.db, parsed.gameId);
-  if (!g || g.status !== 'active') return answer(ctx, cq, ENDED_TEXT);
-  await handler({ ctx, cq, g, arg: parsed.arg });
+  if (!g) return answer(ctx, cq, ENDED_TEXT);
+  if (!entry.statuses.includes(g.status)) {
+    return answer(ctx, cq, g.status === 'counting' ? COUNTING_TEXT : ENDED_TEXT);
+  }
+  await entry.handler({ ctx, cq, g, arg: parsed.arg });
 }
 
 /**

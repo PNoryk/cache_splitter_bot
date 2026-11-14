@@ -13,7 +13,8 @@ export default {
    */
   async fetch(request, env) {
     if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
-    if (request.headers.get('X-Telegram-Bot-Api-Secret-Token') !== env.WEBHOOK_SECRET) {
+    const secret = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
+    if (!env.WEBHOOK_SECRET || secret !== env.WEBHOOK_SECRET) {
       return new Response('Forbidden', { status: 403 });
     }
     try {

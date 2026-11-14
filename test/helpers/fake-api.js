@@ -1,3 +1,5 @@
+import { TelegramError } from '../../platform/telegram.js';
+
 /**
  * Fake Telegram API for tests: records calls, hands out message ids.
  * @param {number} [firstMessageId]
@@ -9,6 +11,8 @@ export function createFakeApi(firstMessageId = 1) {
     /** @type {{method: string, params: any}[]} */
     calls: [],
     nextMessageId: firstMessageId,
+    /** @type {Set<string>} */
+    deleted: new Set(),
     /**
      * @param {string} method
      * @param {object} params
@@ -16,6 +20,13 @@ export function createFakeApi(firstMessageId = 1) {
      */
     async call(method, params) {
       api.calls.push({ method, params });
+      if (method === 'deleteMessage') {
+        const key = `${params.chat_id}:${params.message_id}`;
+        if (api.deleted.has(key)) {
+          throw new TelegramError('Bad Request: message to delete not found', 400);
+        }
+        api.deleted.add(key);
+      }
       if (method === 'sendMessage') return { message_id: api.nextMessageId++ };
       return true;
     },

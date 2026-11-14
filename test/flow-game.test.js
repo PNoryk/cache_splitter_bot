@@ -149,7 +149,7 @@ test('rebuy: self, then chooser with guest, foreign target refused', async () =>
   await handleUpdate(press(w.uid(), `${id}:guest`, A), w.ctx);
   const prompt = of(w.api, 'sendMessage')[0];
   assert.equal(prompt.text, `Имя гостя для игры #${id}? Ответьте на это сообщение.`);
-  assert.deepEqual(prompt.reply_markup, { force_reply: true, selective: true });
+  assert.deepEqual(prompt.reply_markup, { force_reply: true, input_field_placeholder: 'Имя гостя' });
 });
 
 test('guest via ForceReply, rebuy chooser, rb for guest and foreign refused', async () => {
@@ -288,4 +288,46 @@ test('worker: 405, 403, and 200 with logged error on bad JSON', async () => {
     console.error = orig;
   }
   assert.equal(logged.length, 1);
+});
+
+test('double tap on rebuy chooser writes one rebuy and refreshes once', async () => {
+  const w = world();
+  const id = await startGame(w);
+  await handleUpdate(press(w.uid(), `${id}:join`, A), w.ctx);
+  const reply = cmd(w.uid(), 'Дима', A);
+  reply.message.reply_to_message = {
+    from: { is_bot: true }, text: `Имя гостя для игры #${id}? Ответьте на это сообщение.`,
+  };
+  await handleUpdate(reply, w.ctx);
+  const guest = (await loadGame(w.db, id)).players[1];
+  const before = (await loadGame(w.db, id)).entries.length;
+  w.api.calls.length = 0;
+  await handleUpdate(press(w.uid(), `${id}:rb:${guest.id}`, A, GROUP, 555), w.ctx);
+  await handleUpdate(press(w.uid(), `${id}:rb:${guest.id}`, A, GROUP, 555), w.ctx);
+  assert.equal((await loadGame(w.db, id)).entries.length, before + 1);
+  assert.equal(of(w.api, 'editMessageText').length, 1);
+  assert.equal(of(w.api, 'answerCallbackQuery').length, 2);
+});
+
+test('active-only button on a counting game explains', async () => {
+  const w = world();
+  const id = await startGame(w);
+  await setStatus(w.db, id, ['active'], 'counting');
+  w.api.calls.length = 0;
+  await handleUpdate(press(w.uid(), `${id}:rebuy`, A), w.ctx);
+  assert.equal(
+    of(w.api, 'answerCallbackQuery')[0].text,
+    'Идёт подсчёт — сначала «Вернуться в игру»',
+  );
+});
+
+test('worker: unset or empty secret rejects everything', async () => {
+  const mk = () => new Request('https://x.test/', { method: 'POST', body: '{}' });
+  const env = { BOT_TOKEN: 't', BOT_USERNAME: BOT, DB: createD1() };
+  assert.equal((await worker.fetch(mk(), env)).status, 403);
+  assert.equal((await worker.fetch(mk(), { ...env, WEBHOOK_SECRET: '' })).status, 403);
+  const req = new Request('https://x.test/', {
+    method: 'POST', body: '{}', headers: { 'X-Telegram-Bot-Api-Secret-Token': '' },
+  });
+  assert.equal((await worker.fetch(req, { ...env, WEBHOOK_SECRET: '' })).status, 403);
 });
