@@ -13,7 +13,7 @@ import { TelegramError } from './telegram.js';
 import { formatKop } from '../core/money.js';
 import {
   parseGameArgs, rebuyTargets, undoTarget, settlement, discrepancyChips, missingStacks,
-  parseStackInput, resolvePlayer, playerByTg,
+  parseStackInput, resolvePlayer, playerByTg, activePlayers, buyinsOf, nameKey,
 } from '../core/game.js';
 
 /**
@@ -22,6 +22,7 @@ import {
  * @typedef {{db: any, api: Api, botUsername: string}} Ctx
  * @typedef {{id: number, first_name?: string, last_name?: string, is_bot?: boolean}} TgUser
  * @typedef {{ctx: Ctx, cq: any, g: GameSnapshot, arg: string | null}} CbCall
+ * @typedef {'created' | 'rejoined' | 'existing' | 'closed'} JoinResult
  */
 
 const MAX_NAME = 32;
@@ -29,6 +30,8 @@ const GUEST_PROMPT_PREFIX = 'Имя гостя для игры #';
 const COUNTING_TEXT = 'Идёт подсчёт — сначала «Вернуться в игру»';
 const ENDED_TEXT = 'Игра уже закончена';
 const NOT_IN_GAME = 'Ты не в игре';
+const COUNTING_JOIN_TEXT = 'Идёт подсчёт — присоединиться уже нельзя';
+const NAME_TAKEN = 'Такое имя уже есть, введите другое';
 const PRICE_USAGE = 'Формат: /price 1000 50';
 const STACK_USAGE = 'Не понял. Число фишек, или «Имя число»';
 const GAME_HINT = 'Чтобы начать игру, напишите: /game 1000 50\n'
@@ -88,17 +91,22 @@ async function answer(ctx, cq, text) {
 }
 
 /**
- * Join the user to the game; sends nothing, returns whether a player was created.
+ * Join the user to the game; sends nothing. A player who left (no active
+ * entries) rejoins with a new buyin.
  * @param {Ctx} ctx
  * @param {number} gameId
  * @param {TgUser} from
- * @returns {Promise<boolean>}
+ * @returns {Promise<JoinResult>}
  */
 async function joinUser(ctx, gameId, from) {
   const res = await addPlayer(ctx.db, gameId, {
     tgUserId: from.id, name: displayName(from), addedBy: from.id,
   });
-  return res.created;
+  if (res.created) return 'created';
+  const g = await loadGame(ctx.db, gameId);
+  if (g && buyinsOf(g, res.playerId) > 0) return 'existing';
+  const added = await addEntry(ctx.db, gameId, res.playerId, 'buyin', from.id);
+  return added ? 'rejoined' : 'closed';
 }
 
 /**
@@ -161,13 +169,17 @@ async function cmdStart(ctx, msg, args) {
   const gameId = Number(m[1]);
   const g0 = await loadGame(ctx.db, gameId);
   if (!g0 || g0.status !== 'active') {
+    const text = g0 && g0.status === 'counting' ? COUNTING_JOIN_TEXT : ENDED_TEXT;
+    await ctx.api.call('sendMessage', { chat_id: msg.chat.id, text });
+    return;
+  }
+  if ((await joinUser(ctx, gameId, msg.from)) === 'closed') {
     await ctx.api.call('sendMessage', { chat_id: msg.chat.id, text: ENDED_TEXT });
     return;
   }
-  const created = await joinUser(ctx, gameId, msg.from);
   const g = /** @type {GameSnapshot} */ (await loadGame(ctx.db, gameId));
   await ctx.api.call('sendMessage', { chat_id: msg.chat.id, ...personalView(g) });
-  if (created) await refreshGameMessage(ctx, gameId);
+  await refreshGameMessage(ctx, gameId);
 }
 
 /**
@@ -192,7 +204,9 @@ async function cmdPrice(ctx, msg, args) {
   if (gameId === null) return say('Нет активной игры');
   const parsed = parseGameArgs(args);
   if (!parsed) return say(PRICE_USAGE);
-  await setPrice(ctx.db, gameId, parsed.chipsPerBuyin, parsed.priceKop);
+  if (!(await setPrice(ctx.db, gameId, parsed.chipsPerBuyin, parsed.priceKop))) {
+    return say(ENDED_TEXT);
+  }
   await refreshGameMessage(ctx, gameId);
   const g = /** @type {GameSnapshot} */ (await loadGame(ctx.db, gameId));
   if (g.status === 'counting') await refreshCountMessage(ctx, g);
@@ -200,6 +214,7 @@ async function cmdPrice(ctx, msg, args) {
     `${displayName(msg.from)} изменил: ${parsed.chipsPerBuyin} фишек`
     + ` = ${formatKop(parsed.priceKop)}`,
   );
+  if (g.status === 'counting') await reconcile(ctx, g);
 }
 
 /** @type {Record<string, (ctx: Ctx, msg: any, args: string) => Promise<void>>} */
@@ -221,6 +236,12 @@ async function guestReply(ctx, msg) {
   const gameId = Number(m[1]);
   const g = await loadGame(ctx.db, gameId);
   if (!g || g.status !== 'active') return true;
+  if (activePlayers(g).some((p) => nameKey(p.name) === nameKey(name))) {
+    await ctx.api.call('sendMessage', {
+      chat_id: msg.chat.id, reply_to_message_id: msg.message_id, text: NAME_TAKEN,
+    });
+    return true;
+  }
   await addPlayer(ctx.db, gameId, { tgUserId: null, name, addedBy: msg.from.id });
   await refreshGameMessage(ctx, gameId);
   return true;
@@ -244,14 +265,15 @@ async function handleMessage(ctx, msg) {
 }
 
 /**
- * Callback: join the game.
+ * Callback: join (or rejoin) the game; the game message is refreshed in any case.
  * @param {CbCall} c
  * @returns {Promise<void>}
  */
 async function cbJoin({ ctx, cq, g }) {
-  const created = await joinUser(ctx, g.id, cq.from);
-  await answer(ctx, cq, created ? undefined : 'Ты уже в игре');
-  if (created) await refreshGameMessage(ctx, g.id);
+  const res = await joinUser(ctx, g.id, cq.from);
+  if (res === 'closed') return answer(ctx, cq, ENDED_TEXT);
+  await answer(ctx, cq, res === 'existing' ? 'Ты уже в игре' : undefined);
+  await refreshGameMessage(ctx, g.id);
 }
 
 /**
@@ -263,7 +285,9 @@ async function rebuyFlow({ ctx, cq, g }) {
   const targets = rebuyTargets(g, cq.from.id);
   if (targets.length === 0) return answer(ctx, cq, 'Сначала „Я в игре“');
   if (targets.length === 1 && targets[0].tgUserId === cq.from.id) {
-    await addEntry(ctx.db, g.id, targets[0].id, 'rebuy', cq.from.id);
+    if (!(await addEntry(ctx.db, g.id, targets[0].id, 'rebuy', cq.from.id))) {
+      return answer(ctx, cq, ENDED_TEXT);
+    }
     await answer(ctx, cq);
     await afterRebuy(ctx, g.id);
     return;
@@ -305,7 +329,9 @@ async function cbRb({ ctx, cq, g, arg }) {
     if (!(e instanceof TelegramError)) throw e;
     return answer(ctx, cq);
   }
-  await addEntry(ctx.db, g.id, target.id, 'rebuy', cq.from.id);
+  if (!(await addEntry(ctx.db, g.id, target.id, 'rebuy', cq.from.id))) {
+    return answer(ctx, cq, ENDED_TEXT);
+  }
   await answer(ctx, cq);
   await afterRebuy(ctx, g.id);
 }
@@ -354,18 +380,34 @@ async function reconcile(ctx, g) {
 }
 
 /**
+ * Result message of a game whose stacks are all in.
+ * @param {GameSnapshot} g
+ * @param {boolean} split
+ * @param {boolean} round
+ * @returns {import('./views.js').View}
+ */
+function resultFor(g, split, round) {
+  return resultView(g, settlement(g, { split, round }), { round, split });
+}
+
+/**
  * Move counting to settled and send the result; only the winner of the
- * status transition sends it.
+ * status transition sends it. The result is computed first, so a failing
+ * computation leaves the game counting; the game message is refreshed even
+ * if sending the result fails, so its «Итог» button can re-send it.
  * @param {Ctx} ctx
  * @param {GameSnapshot} g
  * @param {boolean} split
  * @returns {Promise<boolean>} whether this call settled the game
  */
 async function settle(ctx, g, split) {
+  const view = resultFor(g, split, false);
   if (!(await setStatus(ctx.db, g.id, ['counting'], 'settled'))) return false;
-  const view = resultView(g, settlement(g, { split, round: false }), { round: false, split });
-  await ctx.api.call('sendMessage', { chat_id: g.chatId, ...view });
-  await refreshGameMessage(ctx, g.id);
+  try {
+    await ctx.api.call('sendMessage', { chat_id: g.chatId, ...view });
+  } finally {
+    await refreshGameMessage(ctx, g.id);
+  }
   return true;
 }
 
@@ -394,14 +436,15 @@ async function refreshCountMessage(ctx, g) {
  * @param {number} playerId
  * @param {number} chips
  * @param {number} enteredBy
- * @returns {Promise<void>}
+ * @returns {Promise<boolean>} false if the game is no longer counting
  */
 async function recordStack(ctx, gameId, playerId, chips, enteredBy) {
-  await upsertStack(ctx.db, gameId, playerId, chips, enteredBy);
+  if (!(await upsertStack(ctx.db, gameId, playerId, chips, enteredBy))) return false;
   const g = /** @type {GameSnapshot} */ (await loadGame(ctx.db, gameId));
-  if (g.status !== 'counting') return;
+  if (g.status !== 'counting') return true;
   await refreshCountMessage(ctx, g);
   await reconcile(ctx, g);
+  return true;
 }
 
 /**
@@ -438,24 +481,24 @@ async function stackMessage(ctx, msg) {
     player = playerByTg(g, msg.from.id);
     if (!player) return reply(NOT_IN_GAME).then(() => true);
   } else {
-    const found = resolvePlayer(g.players, parsed.name);
+    const found = resolvePlayer(activePlayers(g), parsed.name);
     if ('error' in found) {
       const text = found.error === 'not_found'
         ? `Нет игрока ${parsed.name}`
-        : `Уточни имя: ${g.players
-          .filter((p) => p.name.toLowerCase().startsWith(parsed.name.toLowerCase()))
-          .map((p) => p.name)
-          .join(', ')}`;
+        : `Уточни имя: ${found.candidates.map((p) => p.name).join(', ')}`;
       return reply(text).then(() => true);
     }
     player = found.player;
   }
-  await recordStack(ctx, g.id, player.id, parsed.chips, msg.from.id);
+  if (!(await recordStack(ctx, g.id, player.id, parsed.chips, msg.from.id))) {
+    await reply(ENDED_TEXT);
+  }
   return true;
 }
 
 /**
- * Callback: finish the game and start counting.
+ * Callback: finish the game and start counting; stacks kept from an earlier
+ * counting are reconciled at once.
  * @param {CbCall} c
  * @returns {Promise<void>}
  */
@@ -465,6 +508,8 @@ async function cbEnd({ ctx, cq, g }) {
   await setMessageId(ctx.db, g.id, 'count_message_id', sent.message_id);
   await answer(ctx, cq);
   await refreshGameMessage(ctx, g.id);
+  const fresh = await loadGame(ctx.db, g.id);
+  if (fresh && fresh.status === 'counting') await reconcile(ctx, fresh);
 }
 
 /**
@@ -509,12 +554,23 @@ async function cbSplit({ ctx, cq, g }) {
 const cbRounding = (round) => async ({ ctx, cq, g }) => {
   await answer(ctx, cq);
   if (missingStacks(g).length > 0) return;
-  const split = discrepancyChips(g) !== 0;
-  const view = resultView(g, settlement(g, { split, round }), { round, split });
+  const view = resultFor(g, discrepancyChips(g) !== 0, round);
   await ctx.api.call('editMessageText', {
     chat_id: cq.message.chat.id, message_id: cq.message.message_id, ...view,
   });
 };
+
+/**
+ * Callback: send the (exact) result of a settled game again.
+ * @param {CbCall} c
+ * @returns {Promise<void>}
+ */
+async function cbResult({ ctx, cq, g }) {
+  await answer(ctx, cq);
+  if (missingStacks(g).length > 0) return;
+  const view = resultFor(g, discrepancyChips(g) !== 0, false);
+  await ctx.api.call('sendMessage', { chat_id: g.chatId, ...view });
+}
 
 /**
  * Callback: ask for confirmation before cancelling.
@@ -593,6 +649,7 @@ const CALLBACKS = {
   [ACTIONS.cancel_no]: { handler: cbCancelNo, statuses: ['active', 'counting'] },
   [ACTIONS.round]: { handler: cbRounding(true), statuses: ['settled'] },
   [ACTIONS.exact]: { handler: cbRounding(false), statuses: ['settled'] },
+  [ACTIONS.result]: { handler: cbResult, statuses: ['settled'] },
 };
 
 /**

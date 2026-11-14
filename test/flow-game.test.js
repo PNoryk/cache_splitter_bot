@@ -266,3 +266,151 @@ test('worker: unset or empty secret rejects everything', async () => {
   });
   assert.equal((await worker.fetch(req, { ...env, WEBHOOK_SECRET: '' })).status, 403);
 });
+
+/**
+ * Add a guest through the ForceReply prompt.
+ * @param {ReturnType<typeof world>} w
+ * @param {number} id
+ * @param {string} name
+ * @param {any} by
+ * @returns {Promise<void>}
+ */
+async function addGuest(w, id, name, by) {
+  const reply = cmd(w.uid(), name, by);
+  reply.message.reply_to_message = {
+    from: { is_bot: true }, text: `Имя гостя для игры #${id}? Ответьте на это сообщение.`,
+  };
+  await handleUpdate(reply, w.ctx);
+}
+
+test('undoing the own buyin leaves the game; join again rejoins', async () => {
+  const w = world();
+  const id = await startGame(w);
+  for (const u of [A, B, C]) await handleUpdate(press(w.uid(), `${id}:join`, u), w.ctx);
+  await handleUpdate(press(w.uid(), `${id}:undo`, C), w.ctx);
+  assert.ok(!of(w.api, 'editMessageText').at(-1).text.includes('Вера'));
+  await handleUpdate(press(w.uid(), `${id}:rebuy`, C), w.ctx);
+  assert.equal(of(w.api, 'answerCallbackQuery').at(-1).text, 'Сначала „Я в игре“');
+  w.api.calls.length = 0;
+  await handleUpdate(press(w.uid(), `${id}:join`, C), w.ctx);
+  const g = await loadGame(w.db, id);
+  assert.equal(g.players.length, 3);
+  assert.deepEqual(
+    g.entries.filter((e) => e.playerId === g.players[2].id).map((e) => [e.kind, e.cancelled]),
+    [['buyin', true], ['buyin', false]],
+  );
+  assert.equal(of(w.api, 'answerCallbackQuery')[0].text, undefined);
+  assert.ok(of(w.api, 'editMessageText').at(-1).text.includes('Вера · 1 закуп'));
+});
+
+test('repeat join also refreshes the game message', async () => {
+  const w = world();
+  const id = await startGame(w);
+  await handleUpdate(press(w.uid(), `${id}:join`, A), w.ctx);
+  w.api.calls.length = 0;
+  await handleUpdate(press(w.uid(), `${id}:join`, A), w.ctx);
+  assert.equal(of(w.api, 'answerCallbackQuery')[0].text, 'Ты уже в игре');
+  assert.equal(of(w.api, 'editMessageText').length, 1);
+  assert.equal((await loadGame(w.db, id)).entries.length, 1);
+});
+
+test('guest name equal to a player in the game is refused', async () => {
+  const w = world();
+  const id = await startGame(w);
+  await handleUpdate(press(w.uid(), `${id}:join`, B), w.ctx);
+  await addGuest(w, id, 'Дима', A);
+  for (const name of ['  боря ', 'ДИМА']) {
+    w.api.calls.length = 0;
+    await addGuest(w, id, name, A);
+    const sent = of(w.api, 'sendMessage');
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].text, 'Такое имя уже есть, введите другое');
+    assert.equal(sent[0].chat_id, GROUP);
+    assert.ok(sent[0].reply_to_message_id > 0);
+  }
+  assert.deepEqual((await loadGame(w.db, id)).players.map((p) => p.name), ['Боря', 'Дима']);
+  // a name that only shares a prefix is fine
+  await addGuest(w, id, 'Димон', A);
+  assert.equal((await loadGame(w.db, id)).players.length, 3);
+});
+
+test('/start join_<id> during counting is refused', async () => {
+  const w = world();
+  const id = await startGame(w);
+  await handleUpdate(press(w.uid(), `${id}:join`, A), w.ctx);
+  await handleUpdate(press(w.uid(), `${id}:end`, A), w.ctx);
+  w.api.calls.length = 0;
+  await handleUpdate(cmd(w.uid(), `/start join_${id}`, B, B.id), w.ctx);
+  assert.deepEqual(of(w.api, 'sendMessage'), [
+    { chat_id: B.id, text: 'Идёт подсчёт — присоединиться уже нельзя' },
+  ]);
+  assert.equal((await loadGame(w.db, id)).players.length, 1);
+});
+
+test('/game with too many chips or too high price gives the hint', async () => {
+  const w = world();
+  await handleUpdate(cmd(w.uid(), '/game 1000000001 50', A), w.ctx);
+  await handleUpdate(cmd(w.uid(), '/game 1000 1000001', A), w.ctx);
+  assert.equal(await findOpenGame(w.db, GROUP), null);
+  for (const m of of(w.api, 'sendMessage')) assert.ok(m.text.includes('/game 1000 50'));
+});
+
+/**
+ * Make the game finish (settled) right before the first statement whose SQL starts with prefix,
+ * as if a concurrent request won the race.
+ * @param {ReturnType<typeof world>} w
+ * @param {number} id
+ * @param {string} prefix
+ * @returns {void}
+ */
+function finishBefore(w, id, prefix) {
+  const db = w.ctx.db;
+  let armed = true;
+  w.ctx.db = {
+    ...db,
+    prepare: (/** @type {string} */ sql) => {
+      if (armed && sql.startsWith(prefix)) {
+        armed = false;
+        db.prepare("UPDATE games SET status = 'settled' WHERE id = ?").bind(id).runSync();
+      }
+      return db.prepare(sql);
+    },
+  };
+}
+
+test('rebuy that loses the race to settlement writes nothing and says so', async () => {
+  const w = world();
+  const id = await startGame(w);
+  await handleUpdate(press(w.uid(), `${id}:join`, A), w.ctx);
+  finishBefore(w, id, 'INSERT INTO entries');
+  w.api.calls.length = 0;
+  await handleUpdate(press(w.uid(), `${id}:rebuy`, A), w.ctx);
+  assert.equal((await loadGame(w.db, id)).entries.length, 1);
+  assert.equal(of(w.api, 'answerCallbackQuery')[0].text, 'Игра уже закончена');
+  assert.equal(of(w.api, 'editMessageText').length, 0);
+});
+
+test('/price that loses the race to settlement changes nothing and says so', async () => {
+  const w = world();
+  const id = await startGame(w);
+  finishBefore(w, id, 'UPDATE games SET chips_per_buyin');
+  w.api.calls.length = 0;
+  await handleUpdate(cmd(w.uid(), '/price 500 10', A), w.ctx);
+  assert.equal((await loadGame(w.db, id)).priceKop, 5000);
+  assert.deepEqual(of(w.api, 'sendMessage').map((m) => m.text), ['Игра уже закончена']);
+});
+
+test('stack that loses the race to settlement is not written', async () => {
+  const w = world();
+  const id = await startGame(w);
+  await handleUpdate(press(w.uid(), `${id}:join`, A), w.ctx);
+  await handleUpdate(press(w.uid(), `${id}:end`, A), w.ctx);
+  const g = await loadGame(w.db, id);
+  finishBefore(w, id, 'INSERT INTO stacks');
+  w.api.calls.length = 0;
+  const m = cmd(w.uid(), '1000', A);
+  m.message.reply_to_message = { message_id: g.countMessageId };
+  await handleUpdate(m, w.ctx);
+  assert.equal((await loadGame(w.db, id)).stacks.length, 0);
+  assert.deepEqual(of(w.api, 'sendMessage').map((x) => x.text), ['Игра уже закончена']);
+});

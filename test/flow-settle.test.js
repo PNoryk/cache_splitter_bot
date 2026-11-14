@@ -241,3 +241,138 @@ test('back returns to active, end again keeps the stacks', async () => {
   assert.equal(g.stacks.length, 1);
   assert.ok(of(w.api, 'sendMessage').at(-1).text.includes('Паша  700 ✓'));
 });
+
+test('a player out of the game does not block reconciliation', async () => {
+  const w = world();
+  const id = await startGame(w, P);
+  await join(w, id, [P, S, V]);
+  await handleUpdate(press(w.uid(), `${id}:undo`, V), w.ctx);
+  await handleUpdate(press(w.uid(), `${id}:end`, P), w.ctx);
+  const count = of(w.api, 'sendMessage').at(-1).text;
+  assert.ok(!count.includes('Вася'));
+  await stack(w, id, '1500', P);
+  await stack(w, id, '500', S);
+  assert.equal((await loadGame(w.db, id)).status, 'settled');
+  assert.ok(of(w.api, 'sendMessage').at(-1).text.includes('Саша → Паша 25,00'));
+});
+
+test('name clarification lists only matching players in the game', async () => {
+  const w = world();
+  const id = await startGame(w, P);
+  await join(w, id, [P, V, L]);
+  await guest(w, id, 'Ваня', P);
+  await handleUpdate(press(w.uid(), `${id}:undo`, L), w.ctx);
+  await handleUpdate(press(w.uid(), `${id}:end`, P), w.ctx);
+  w.api.calls.length = 0;
+  await stack(w, id, 'ва 100', P);
+  assert.equal(of(w.api, 'sendMessage')[0].text, 'Уточни имя: Вася, Ваня');
+  await stack(w, id, 'вал 100', P);
+  assert.equal(of(w.api, 'sendMessage')[1].text, 'Нет игрока вал');
+});
+
+test('end with all stacks already present settles at once', async () => {
+  const w = world();
+  const id = await startGame(w, P);
+  await join(w, id, [P, S]);
+  await handleUpdate(press(w.uid(), `${id}:end`, P), w.ctx);
+  await stack(w, id, '1000', P);
+  await stack(w, id, '2000', S);
+  assert.ok(of(w.api, 'sendMessage').at(-1).text.includes('расхождение +1000'));
+  // back to the game, the forgotten rebuy is added, the stacks stay
+  await handleUpdate(press(w.uid(), `${id}:back`, P), w.ctx);
+  await handleUpdate(press(w.uid(), `${id}:rebuy`, S), w.ctx);
+  w.api.calls.length = 0;
+  await handleUpdate(press(w.uid(), `${id}:end`, P), w.ctx);
+  assert.equal((await loadGame(w.db, id)).status, 'settled');
+  const sent = of(w.api, 'sendMessage').map((m) => m.text);
+  assert.equal(sent.length, 2);
+  assert.ok(sent[0].startsWith('🧮 Подсчёт'));
+  assert.ok(sent[1].startsWith('✅ Итог'));
+});
+
+test('end with all stacks present and a discrepancy warns at once', async () => {
+  const w = world();
+  const id = await startGame(w, P);
+  await join(w, id, [P, S]);
+  await handleUpdate(press(w.uid(), `${id}:end`, P), w.ctx);
+  await stack(w, id, '1000', P);
+  await stack(w, id, '2000', S);
+  await handleUpdate(press(w.uid(), `${id}:back`, P), w.ctx);
+  w.api.calls.length = 0;
+  await handleUpdate(press(w.uid(), `${id}:end`, P), w.ctx);
+  assert.equal((await loadGame(w.db, id)).status, 'counting');
+  assert.ok(of(w.api, 'sendMessage').at(-1).text.includes('в банке 2000 — расхождение +1000'));
+});
+
+test('/price while counting with all stacks reconciles against the new bank', async () => {
+  const w = world();
+  const id = await startGame(w, P);
+  await join(w, id, [P, S]);
+  await handleUpdate(press(w.uid(), `${id}:end`, P), w.ctx);
+  await stack(w, id, '1500', P);
+  await stack(w, id, '1000', S);
+  assert.ok(of(w.api, 'sendMessage').at(-1).text.includes('в банке 2000'));
+  await handleUpdate(cmd(w.uid(), '/price 1100 50', P), w.ctx);
+  const texts = of(w.api, 'sendMessage').map((m) => m.text);
+  assert.ok(texts.some((t) => t.includes('На столе 2500, в банке 2200 — расхождение +300')));
+  assert.equal((await loadGame(w.db, id)).status, 'counting');
+  await handleUpdate(cmd(w.uid(), '/price 1250 50', P), w.ctx);
+  assert.equal((await loadGame(w.db, id)).status, 'settled');
+  assert.ok(of(w.api, 'sendMessage').some((m) => m.text.startsWith('✅ Итог')));
+});
+
+test('result lost on send: game is settled and the Итог button re-sends it', async () => {
+  const w = world();
+  const id = await startGame(w, P);
+  await join(w, id, [P, S]);
+  await handleUpdate(press(w.uid(), `${id}:end`, P), w.ctx);
+  await stack(w, id, '1500', P);
+  const real = w.api.call;
+  w.api.call = async (method, params) => {
+    if (method === 'sendMessage' && params.text.startsWith('✅ Итог')) {
+      throw new Error('network down');
+    }
+    return real(method, params);
+  };
+  await assert.rejects(stack(w, id, '500', S), /network down/);
+  w.api.call = real;
+  assert.equal((await loadGame(w.db, id)).status, 'settled');
+  const edit = of(w.api, 'editMessageText').at(-1);
+  assert.equal(edit.message_id, 100);
+  assert.deepEqual(edit.reply_markup.inline_keyboard, [[{ text: 'Итог', callback_data: `${id}:result` }]]);
+  w.api.calls.length = 0;
+  await handleUpdate(press(w.uid(), `${id}:result`, S), w.ctx);
+  const sent = of(w.api, 'sendMessage');
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].chat_id, GROUP);
+  assert.equal(sent[0].text, '✅ Итог\n\nСаша → Паша 25,00');
+  assert.deepEqual(sent[0].reply_markup.inline_keyboard, [[{ text: 'Округлить', callback_data: `${id}:round` }]]);
+});
+
+test('settlement that cannot be computed leaves the game counting', async () => {
+  const w = world();
+  const id = await startGame(w, P);
+  await join(w, id, [P, S]);
+  await handleUpdate(press(w.uid(), `${id}:end`, P), w.ctx);
+  await stack(w, id, '1000', P);
+  await stack(w, id, '2000', S);
+  // a corrupt row makes the money computation throw (division by zero)
+  await w.db.prepare('UPDATE games SET chips_per_buyin = 0 WHERE id = ?').bind(id).run();
+  await assert.rejects(handleUpdate(press(w.uid(), `${id}:split`, P), w.ctx), RangeError);
+  assert.equal((await loadGame(w.db, id)).status, 'counting');
+});
+
+test('a stack above 1e9 chips is not accepted', async () => {
+  const w = world();
+  const id = await startGame(w, P);
+  await join(w, id, [P, S]);
+  await handleUpdate(press(w.uid(), `${id}:end`, P), w.ctx);
+  w.api.calls.length = 0;
+  await stack(w, id, '1000000001', P);
+  await stack(w, id, 'Саша 99999999999', P);
+  assert.deepEqual(
+    of(w.api, 'sendMessage').map((m) => m.text),
+    ['Не понял. Число фишек, или «Имя число»', 'Не понял. Число фишек, или «Имя число»'],
+  );
+  assert.equal((await loadGame(w.db, id)).stacks.length, 0);
+});
