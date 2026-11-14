@@ -3,27 +3,9 @@
  * Reads BOT_TOKEN and WEBHOOK_SECRET from the environment; never prints them.
  */
 import { pathToFileURL } from 'node:url';
+import { call } from './bot-api.js';
 
 const USAGE = 'Usage: BOT_TOKEN=... WEBHOOK_SECRET=... node scripts/set-webhook.js <worker-url>';
-
-/**
- * Calls one Telegram Bot API method.
- * @param {typeof fetch} fetchFn
- * @param {string} token
- * @param {string} method
- * @param {object} body
- * @returns {Promise<any>} the `result` field of the API response
- */
-async function call(fetchFn, token, method, body) {
-  const res = await fetchFn(`https://api.telegram.org/bot${token}/${method}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json();
-  if (!data.ok) throw new Error(`${method} failed: ${data.description ?? res.status}`);
-  return data.result;
-}
 
 /**
  * Sets the webhook and returns getWebhookInfo.

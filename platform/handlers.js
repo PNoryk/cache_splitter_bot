@@ -37,9 +37,15 @@ const PRICE_USAGE = 'Формат: /price 1000 50';
 const STACK_USAGE = 'Не понял. Число фишек, или «Имя число»';
 const GAME_HINT = 'Чтобы начать игру, напишите: /game 1000 50\n'
   + '(фишек в одном закупе и цена закупа)';
-const START_HELP = 'Я считаю деньги за покерные игры.\n'
-  + 'В группе напишите /game 1000 50: фишек в закупе и цена закупа.\n'
-  + 'Присоединиться можно кнопкой в игровом сообщении или по ссылке-приглашению.';
+const HELP_TEXT = 'Я считаю деньги за покерные игры.\n\n'
+  + 'В группе:\n'
+  + '/game 1000 50 — начать игру: 1000 фишек за закуп ценой 50.\n'
+  + '/price 1000 50 — изменить закуп, пока игра идёт.\n'
+  + 'Кнопки под сообщением игры: «Я в игре», «+ Докуп», гости, приглашение, отмена.\n\n'
+  + 'В конце нажмите «Закончить». Ответьте на сообщение подсчёта числом фишек;'
+  + ' за гостя или другого игрока — «Имя число».\n'
+  + 'Если фишек больше или меньше, чем в банке, можно дописать докуп'
+  + ' или разделить разницу на всех.';
 
 /**
  * Display name of a Telegram user, at most 32 chars.
@@ -189,7 +195,7 @@ async function cmdStart(ctx, msg, args) {
   if (msg.chat.type !== 'private') return;
   const m = /^join_(\d+)$/.exec(args.trim());
   if (!m) {
-    await ctx.api.call('sendMessage', { chat_id: msg.chat.id, text: START_HELP });
+    await ctx.api.call('sendMessage', { chat_id: msg.chat.id, text: HELP_TEXT });
     return;
   }
   const gameId = Number(m[1]);
@@ -243,8 +249,18 @@ async function cmdPrice(ctx, msg, args) {
   if (g.status === 'counting') await reconcile(ctx, g);
 }
 
+/**
+ * Handle /help in any chat.
+ * @param {Ctx} ctx
+ * @param {any} msg
+ * @returns {Promise<void>}
+ */
+async function cmdHelp(ctx, msg) {
+  await ctx.api.call('sendMessage', { chat_id: msg.chat.id, text: HELP_TEXT });
+}
+
 /** @type {Record<string, (ctx: Ctx, msg: any, args: string) => Promise<void>>} */
-const COMMANDS = { game: cmdGame, start: cmdStart, price: cmdPrice };
+const COMMANDS = { game: cmdGame, start: cmdStart, price: cmdPrice, help: cmdHelp };
 
 /**
  * Handle a reply to the "guest name" prompt; true if the message was one.

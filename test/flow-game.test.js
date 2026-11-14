@@ -414,3 +414,17 @@ test('stack that loses the race to settlement is not written', async () => {
   assert.equal((await loadGame(w.db, id)).stacks.length, 0);
   assert.deepEqual(of(w.api, 'sendMessage').map((x) => x.text), ['Игра уже закончена']);
 });
+
+test('/help answers in group (with or without @bot) and in private with the same text', async () => {
+  const w = world();
+  await handleUpdate(cmd(w.uid(), '/help', B), w.ctx);
+  await handleUpdate(cmd(w.uid(), `/help@${BOT}`, B), w.ctx);
+  await handleUpdate(cmd(w.uid(), '/help', B, B.id), w.ctx);
+  await handleUpdate(cmd(w.uid(), '/start', B, B.id), w.ctx);
+  const sent = of(w.api, 'sendMessage');
+  assert.deepEqual(sent.map((m) => m.chat_id), [GROUP, GROUP, B.id, B.id]);
+  assert.equal(new Set(sent.map((m) => m.text)).size, 1);
+  for (const part of ['/game 1000 50', '/price', 'Ответьте на сообщение подсчёта']) {
+    assert.ok(sent[0].text.includes(part), part);
+  }
+});

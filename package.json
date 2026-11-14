@@ -10,7 +10,8 @@
     "test": "node --disable-warning=ExperimentalWarning --test",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "set-webhook": "node scripts/set-webhook.js"
+    "set-webhook": "node scripts/set-webhook.js",
+    "set-commands": "node scripts/set-commands.js"
   },
   "devDependencies": {
     "wrangler": "^4"
