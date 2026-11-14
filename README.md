@@ -23,10 +23,14 @@ Telegram-бот для группового чата: считает, кто к�
    npx wrangler secret put BOT_TOKEN
    npx wrangler secret put WEBHOOK_SECRET
    ```
+   Если воркер ещё не задеплоен, первый `wrangler secret put` предложит его создать — ответить
+   «да» (или сначала выполнить шаг 6, затем вернуться к секретам).
 6. `npm run deploy` — выведет URL воркера.
-7. Зарегистрировать вебхук (токен и секрет не печатаются; `allowed_updates`: `message`, `callback_query`):
+7. Зарегистрировать вебхук (токен и секрет не печатаются; `allowed_updates`: `message`,
+   `callback_query`; `max_connections: 1` — апдейты обрабатываются по одному).
+   Чтобы токен не попал в историю шелла, переменные берутся из `.dev.vars` (см. ниже):
    ```
-   BOT_TOKEN=... WEBHOOK_SECRET=... npm run set-webhook -- https://<worker>.workers.dev
+   set -a; . ./.dev.vars; set +a; npm run set-webhook -- https://<worker>.workers.dev
    ```
 
 ## Локальная разработка
