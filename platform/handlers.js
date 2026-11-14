@@ -1,13 +1,19 @@
 /**
- * Telegram update handling for the game phase: /game, joining, rebuys, undo, guests.
+ * Telegram update handling: /game, joining, rebuys, undo, guests, stack counting, settlement.
  */
 import {
   markUpdate, findOpenGame, createGame, setMessageId, loadGame, addPlayer, addEntry,
-  cancelEntry,
+  cancelEntry, setStatus, upsertStack, findGameByCountMessage, findCountingGameForDm,
 } from './db.js';
-import { gameView, personalView, rebuyChooserView, parseCb, ACTIONS } from './views.js';
+import {
+  gameView, personalView, rebuyChooserView, countView, discrepancyView, resultView,
+  parseCb, ACTIONS,
+} from './views.js';
 import { TelegramError } from './telegram.js';
-import { parseGameArgs, rebuyTargets, undoTarget } from '../core/game.js';
+import {
+  parseGameArgs, rebuyTargets, undoTarget, settlement, discrepancyChips, missingStacks,
+  parseStackInput, resolvePlayer, playerByTg,
+} from '../core/game.js';
 
 /**
  * @typedef {import('../core/types.js').GameSnapshot} GameSnapshot
@@ -21,6 +27,8 @@ const MAX_NAME = 32;
 const GUEST_PROMPT_PREFIX = 'Имя гостя для игры #';
 const COUNTING_TEXT = 'Идёт подсчёт — сначала «Вернуться в игру»';
 const ENDED_TEXT = 'Игра уже закончена';
+const NOT_IN_GAME = 'Ты не в игре';
+const STACK_USAGE = 'Не понял. Число фишек, или «Имя число»';
 const GAME_HINT = 'Чтобы начать игру, напишите: /game 1000 50\n'
   + '(фишек в одном закупе и цена закупа)';
 const START_HELP = 'Я считаю деньги за покерные игры.\n'
@@ -192,6 +200,7 @@ async function guestReply(ctx, msg) {
 async function handleMessage(ctx, msg) {
   if (typeof msg.text !== 'string' || !msg.from) return;
   if (await guestReply(ctx, msg)) return;
+  if (!msg.text.startsWith('/') && (await stackMessage(ctx, msg))) return;
   const m = /^\/(\w+)(?:@(\w+))?(?:\s+([\s\S]*))?$/.exec(msg.text);
   if (!m) return;
   if (m[2] && m[2].toLowerCase() !== ctx.botUsername.toLowerCase()) return;
@@ -211,17 +220,17 @@ async function cbJoin({ ctx, cq, g }) {
 }
 
 /**
- * Callback: rebuy for self or choose whom for.
+ * Rebuy for self, or send the chooser; reconciles after a direct rebuy while counting.
  * @param {CbCall} c
  * @returns {Promise<void>}
  */
-async function cbRebuy({ ctx, cq, g }) {
+async function rebuyFlow({ ctx, cq, g }) {
   const targets = rebuyTargets(g, cq.from.id);
   if (targets.length === 0) return answer(ctx, cq, 'Сначала „Я в игре“');
   if (targets.length === 1 && targets[0].tgUserId === cq.from.id) {
     await addEntry(ctx.db, g.id, targets[0].id, 'rebuy', cq.from.id);
     await answer(ctx, cq);
-    await refreshGameMessage(ctx, g.id);
+    await afterRebuy(ctx, g.id);
     return;
   }
   await answer(ctx, cq);
@@ -230,6 +239,18 @@ async function cbRebuy({ ctx, cq, g }) {
     reply_to_message_id: cq.message.message_id,
     ...rebuyChooserView(g, targets),
   });
+}
+
+/**
+ * After a rebuy: refresh the game message and, while counting, reconcile again.
+ * @param {Ctx} ctx
+ * @param {number} gameId
+ * @returns {Promise<void>}
+ */
+async function afterRebuy(ctx, gameId) {
+  await refreshGameMessage(ctx, gameId);
+  const g = await loadGame(ctx.db, gameId);
+  if (g && g.status === 'counting') await reconcile(ctx, g);
 }
 
 /**
@@ -251,7 +272,7 @@ async function cbRb({ ctx, cq, g, arg }) {
   }
   await addEntry(ctx.db, g.id, target.id, 'rebuy', cq.from.id);
   await answer(ctx, cq);
-  await refreshGameMessage(ctx, g.id);
+  await afterRebuy(ctx, g.id);
 }
 
 /**
@@ -282,6 +303,185 @@ async function cbGuest({ ctx, cq, g }) {
 }
 
 /**
+ * Send the discrepancy warning, or settle at once when the stacks match the bank.
+ * Does nothing while some stacks are missing.
+ * @param {Ctx} ctx
+ * @param {GameSnapshot} g fresh snapshot of a counting game
+ * @returns {Promise<void>}
+ */
+async function reconcile(ctx, g) {
+  if (missingStacks(g).length > 0) return;
+  if (discrepancyChips(g) !== 0) {
+    await ctx.api.call('sendMessage', { chat_id: g.chatId, ...discrepancyView(g) });
+    return;
+  }
+  await settle(ctx, g, false);
+}
+
+/**
+ * Move counting to settled and send the result; only the winner of the
+ * status transition sends it.
+ * @param {Ctx} ctx
+ * @param {GameSnapshot} g
+ * @param {boolean} split
+ * @returns {Promise<boolean>} whether this call settled the game
+ */
+async function settle(ctx, g, split) {
+  if (!(await setStatus(ctx.db, g.id, ['counting'], 'settled'))) return false;
+  const view = resultView(g, settlement(g, { split, round: false }), { round: false, split });
+  await ctx.api.call('sendMessage', { chat_id: g.chatId, ...view });
+  await refreshGameMessage(ctx, g.id);
+  return true;
+}
+
+/**
+ * Edit the count message to the current stacks, ignoring "not modified".
+ * @param {Ctx} ctx
+ * @param {GameSnapshot} g
+ * @returns {Promise<void>}
+ */
+async function refreshCountMessage(ctx, g) {
+  if (g.countMessageId === null) return;
+  try {
+    await ctx.api.call('editMessageText', {
+      chat_id: g.chatId, message_id: g.countMessageId, ...countView(g),
+    });
+  } catch (e) {
+    const desc = e && /** @type {any} */ (e).description;
+    if (typeof desc !== 'string' || !desc.includes('message is not modified')) throw e;
+  }
+}
+
+/**
+ * Record a stack for a player, refresh the count message and reconcile.
+ * @param {Ctx} ctx
+ * @param {number} gameId
+ * @param {number} playerId
+ * @param {number} chips
+ * @param {number} enteredBy
+ * @returns {Promise<void>}
+ */
+async function recordStack(ctx, gameId, playerId, chips, enteredBy) {
+  await upsertStack(ctx.db, gameId, playerId, chips, enteredBy);
+  const g = /** @type {GameSnapshot} */ (await loadGame(ctx.db, gameId));
+  if (g.status !== 'counting') return;
+  await refreshCountMessage(ctx, g);
+  await reconcile(ctx, g);
+}
+
+/**
+ * Handle a plain message as a stack entry; true if it was consumed.
+ * @param {Ctx} ctx
+ * @param {any} msg
+ * @returns {Promise<boolean>}
+ */
+async function stackMessage(ctx, msg) {
+  const chatId = msg.chat.id;
+  let gameId = null;
+  if (msg.chat.type === 'private') {
+    gameId = await findCountingGameForDm(ctx.db, msg.from.id);
+  } else if (msg.reply_to_message && msg.reply_to_message.message_id) {
+    gameId = await findGameByCountMessage(ctx.db, chatId, msg.reply_to_message.message_id);
+  }
+  if (gameId === null) return false;
+  const g = await loadGame(ctx.db, gameId);
+  if (!g || g.status !== 'counting') return false;
+  /**
+   * Reply to the user's message.
+   * @param {string} text
+   * @returns {Promise<void>}
+   */
+  const reply = async (text) => {
+    await ctx.api.call('sendMessage', {
+      chat_id: chatId, reply_to_message_id: msg.message_id, text,
+    });
+  };
+  const parsed = parseStackInput(msg.text);
+  if (!parsed) return reply(STACK_USAGE).then(() => true);
+  let player;
+  if (parsed.name === null) {
+    player = playerByTg(g, msg.from.id);
+    if (!player) return reply(NOT_IN_GAME).then(() => true);
+  } else {
+    const found = resolvePlayer(g.players, parsed.name);
+    if ('error' in found) {
+      const text = found.error === 'not_found'
+        ? `Нет игрока ${parsed.name}`
+        : `Уточни имя: ${g.players
+          .filter((p) => p.name.toLowerCase().startsWith(parsed.name.toLowerCase()))
+          .map((p) => p.name)
+          .join(', ')}`;
+      return reply(text).then(() => true);
+    }
+    player = found.player;
+  }
+  await recordStack(ctx, g.id, player.id, parsed.chips, msg.from.id);
+  return true;
+}
+
+/**
+ * Callback: finish the game and start counting.
+ * @param {CbCall} c
+ * @returns {Promise<void>}
+ */
+async function cbEnd({ ctx, cq, g }) {
+  if (!(await setStatus(ctx.db, g.id, ['active'], 'counting'))) return answer(ctx, cq);
+  const sent = await ctx.api.call('sendMessage', { chat_id: g.chatId, ...countView(g) });
+  await setMessageId(ctx.db, g.id, 'count_message_id', sent.message_id);
+  await answer(ctx, cq);
+  await refreshGameMessage(ctx, g.id);
+}
+
+/**
+ * Callback: back from counting to the game.
+ * @param {CbCall} c
+ * @returns {Promise<void>}
+ */
+async function cbBack({ ctx, cq, g }) {
+  if (!(await setStatus(ctx.db, g.id, ['counting'], 'active'))) return answer(ctx, cq);
+  await answer(ctx, cq);
+  await refreshGameMessage(ctx, g.id);
+}
+
+/**
+ * Callback: own stack is zero.
+ * @param {CbCall} c
+ * @returns {Promise<void>}
+ */
+async function cbZero({ ctx, cq, g }) {
+  const player = playerByTg(g, cq.from.id);
+  if (!player) return answer(ctx, cq, NOT_IN_GAME);
+  await answer(ctx, cq);
+  await recordStack(ctx, g.id, player.id, 0, cq.from.id);
+}
+
+/**
+ * Callback: split the discrepancy evenly and settle.
+ * @param {CbCall} c
+ * @returns {Promise<void>}
+ */
+async function cbSplit({ ctx, cq, g }) {
+  await answer(ctx, cq);
+  if (missingStacks(g).length > 0) return;
+  await settle(ctx, g, true);
+}
+
+/**
+ * Callback: round the result to whole units or show exact amounts.
+ * @param {boolean} round
+ * @returns {(c: CbCall) => Promise<void>}
+ */
+const cbRounding = (round) => async ({ ctx, cq, g }) => {
+  await answer(ctx, cq);
+  if (missingStacks(g).length > 0) return;
+  const split = discrepancyChips(g) !== 0;
+  const view = resultView(g, settlement(g, { split, round }), { round, split });
+  await ctx.api.call('editMessageText', {
+    chat_id: cq.message.chat.id, message_id: cq.message.message_id, ...view,
+  });
+};
+
+/**
  * @typedef {{handler: (c: CbCall) => Promise<void>, statuses: string[]}} CbEntry
  */
 
@@ -292,10 +492,17 @@ async function cbGuest({ ctx, cq, g }) {
  */
 const CALLBACKS = {
   [ACTIONS.join]: { handler: cbJoin, statuses: ['active'] },
-  [ACTIONS.rebuy]: { handler: cbRebuy, statuses: ['active'] },
-  [ACTIONS.rb]: { handler: cbRb, statuses: ['active'] },
+  [ACTIONS.rebuy]: { handler: rebuyFlow, statuses: ['active'] },
+  [ACTIONS.rb]: { handler: cbRb, statuses: ['active', 'counting'] },
   [ACTIONS.undo]: { handler: cbUndo, statuses: ['active'] },
   [ACTIONS.guest]: { handler: cbGuest, statuses: ['active'] },
+  [ACTIONS.end]: { handler: cbEnd, statuses: ['active'] },
+  [ACTIONS.back]: { handler: cbBack, statuses: ['counting'] },
+  [ACTIONS.zero]: { handler: cbZero, statuses: ['counting'] },
+  [ACTIONS.fix]: { handler: rebuyFlow, statuses: ['counting'] },
+  [ACTIONS.split]: { handler: cbSplit, statuses: ['counting'] },
+  [ACTIONS.round]: { handler: cbRounding(true), statuses: ['settled'] },
+  [ACTIONS.exact]: { handler: cbRounding(false), statuses: ['settled'] },
 };
 
 /**

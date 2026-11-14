@@ -1,81 +1,24 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createD1 } from './helpers/d1.js';
-import { createFakeApi } from './helpers/fake-api.js';
+import {
+  BOT, GROUP, world, cmd, press, of, startGame as startGameBy,
+} from './helpers/updates.js';
 import { handleUpdate } from '../platform/handlers.js';
 import worker from '../platform/worker.js';
 import { loadGame, findOpenGame, setStatus } from '../platform/db.js';
 import { TelegramError } from '../platform/telegram.js';
 
-const BOT = 'cash_bot';
-const GROUP = -100;
 const A = { id: 1, first_name: 'Аня', last_name: 'Ким' };
 const B = { id: 2, first_name: 'Боря' };
 const C = { id: 3, first_name: 'Вера' };
 
 /**
- * Fresh test world.
- * @returns {{db: any, api: any, ctx: any, uid: () => number}}
- */
-function world() {
-  const db = createD1();
-  const api = createFakeApi(100);
-  let n = 0;
-  return { db, api, ctx: { db, api, botUsername: BOT }, uid: () => ++n };
-}
-
-/**
- * Command update.
- * @param {number} id
- * @param {string} text
- * @param {any} from
- * @param {number} chat
- * @returns {object}
- */
-function cmd(id, text, from, chat = GROUP) {
-  return {
-    update_id: id,
-    message: {
-      message_id: id, text, from, chat: { id: chat, type: chat > 0 ? 'private' : 'supergroup' },
-    },
-  };
-}
-
-/**
- * Callback press update.
- * @param {number} id
- * @param {string} data
- * @param {any} from
- * @param {number} chat
- * @param {number} messageId
- * @returns {object}
- */
-function press(id, data, from, chat = GROUP, messageId = 100) {
-  return {
-    update_id: id,
-    callback_query: {
-      id: `cq${id}`, data, from, message: { message_id: messageId, chat: { id: chat } },
-    },
-  };
-}
-
-/**
- * Calls of a method.
- * @param {any} api
- * @param {string} method
- * @returns {any[]}
- */
-const of = (api, method) => api.calls.filter((c) => c.method === method).map((c) => c.params);
-
-/**
- * Start a game in GROUP and return its id.
+ * Start a game in GROUP by A.
  * @param {ReturnType<typeof world>} w
  * @returns {Promise<number>}
  */
-async function startGame(w) {
-  await handleUpdate(cmd(w.uid(), '/game 1000 50', A), w.ctx);
-  return /** @type {number} */ (await findOpenGame(w.db, GROUP));
-}
+const startGame = (w) => startGameBy(w, A);
 
 test('/game creates a game message, also with bot suffix elsewhere', async () => {
   const w = world();
@@ -242,11 +185,11 @@ test('buttons on a cancelled game answer and change nothing', async () => {
   assert.equal(of(w.api, 'editMessageText').length, 0);
 });
 
-test('unknown callback only answers', async () => {
+test('unregistered callback only answers', async () => {
   const w = world();
   const id = await startGame(w);
   w.api.calls.length = 0;
-  await handleUpdate(press(w.uid(), `${id}:end`, A), w.ctx);
+  await handleUpdate(press(w.uid(), `${id}:cancel`, A), w.ctx);
   assert.deepEqual(w.api.calls.map((c) => c.method), ['answerCallbackQuery']);
 });
 
