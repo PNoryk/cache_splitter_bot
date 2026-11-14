@@ -41,6 +41,8 @@ export async function setWebhook(args, env, fetchFn = fetch) {
     secret_token: secret,
     allowed_updates: ['message', 'callback_query'],
     drop_pending_updates: true,
+    // One update at a time: handlers read-modify-write the game without locks.
+    max_connections: 1,
   });
   return call(fetchFn, token, 'getWebhookInfo', {});
 }

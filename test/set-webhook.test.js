@@ -16,7 +16,7 @@ function fakeFetch(calls) {
   };
 }
 
-test('setWebhook sends secret and allowed_updates, returns info', async () => {
+test('setWebhook sends secret, allowed_updates and one connection, returns info', async () => {
   const calls = [];
   const info = await setWebhook(['https://w.example'], ENV, fakeFetch(calls));
   assert.equal(calls.length, 2);
@@ -26,6 +26,7 @@ test('setWebhook sends secret and allowed_updates, returns info', async () => {
     secret_token: 's3cret',
     allowed_updates: ['message', 'callback_query'],
     drop_pending_updates: true,
+    max_connections: 1,
   });
   assert.match(calls[1].url, /\/getWebhookInfo$/);
   assert.equal(info.url, 'https://w.example');
