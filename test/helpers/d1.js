@@ -15,7 +15,16 @@ const MIGRATIONS_DIR = fileURLToPath(new URL('../../migrations/', import.meta.ur
  * @returns {object}
  */
 function makeStatement(raw, sql, args) {
-  const params = () => args.map((a) => (a === undefined ? null : a));
+  /**
+   * Bound parameters; undefined is rejected like real D1 does.
+   * @returns {unknown[]}
+   */
+  const params = () => {
+    args.forEach((a, i) => {
+      if (a === undefined) throw new Error(`D1_TYPE_ERROR: undefined bind at index ${i}`);
+    });
+    return args;
+  };
   return {
     sql,
     args,
@@ -38,6 +47,10 @@ function makeStatement(raw, sql, args) {
     all: async () => ({ results: raw.prepare(sql).all(...params()).map((r) => ({ ...r })) }),
     /** @returns {Promise<{meta: {changes: number, last_row_id: number}}>} */
     run: async () => runSync(raw, sql, params()),
+    /**
+     * Synchronous run used by batch; returns results and meta.
+     * @returns {{results: object[], meta: {changes: number, last_row_id?: number}}}
+     */
     runSync: () => runSync(raw, sql, params()),
   };
 }
@@ -47,7 +60,7 @@ function makeStatement(raw, sql, args) {
  * @param {DatabaseSync} raw
  * @param {string} sql
  * @param {unknown[]} params
- * @returns {{meta: {changes: number, last_row_id: number}}}
+ * @returns {{results: object[], meta: {changes: number, last_row_id?: number}}}
  */
 function runSync(raw, sql, params) {
   const stmt = raw.prepare(sql);

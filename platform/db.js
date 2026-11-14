@@ -164,20 +164,32 @@ export async function addPlayer(db, gameId, { tgUserId, name, addedBy }) {
       .first();
     if (existing) return { playerId: existing.id, created: false };
   }
-  const [ins] = await db.batch([
-    db
-      .prepare(
-        "INSERT INTO players (game_id, tg_user_id, name, added_by) VALUES (?, ?, ?, ?)",
-      )
-      .bind(gameId, tgUserId, name, addedBy),
-    db
-      .prepare(
-        "INSERT INTO entries (game_id, player_id, kind, created_by)"
-        + " VALUES (?, last_insert_rowid(), 'buyin', ?)",
-      )
-      .bind(gameId, addedBy),
-  ]);
-  return { playerId: ins.meta.last_row_id, created: true };
+  try {
+    const [ins] = await db.batch([
+      db
+        .prepare(
+          "INSERT INTO players (game_id, tg_user_id, name, added_by) VALUES (?, ?, ?, ?)",
+        )
+        .bind(gameId, tgUserId, name, addedBy),
+      db
+        .prepare(
+          "INSERT INTO entries (game_id, player_id, kind, created_by)"
+          + " VALUES (?, last_insert_rowid(), 'buyin', ?)",
+        )
+        .bind(gameId, addedBy),
+    ]);
+    return { playerId: ins.meta.last_row_id, created: true };
+  } catch (e) {
+    // Concurrent join: another request inserted the same tg_user_id first.
+    if (tgUserId !== null && /UNIQUE constraint failed/i.test(String(e && e.message))) {
+      const existing = await db
+        .prepare('SELECT id FROM players WHERE game_id = ? AND tg_user_id = ?')
+        .bind(gameId, tgUserId)
+        .first();
+      if (existing) return { playerId: existing.id, created: false };
+    }
+    throw e;
+  }
 }
 
 /**
