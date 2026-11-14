@@ -130,12 +130,16 @@ function gameLines(g) {
  * Main game message in the chat.
  * @param {GameSnapshot} g
  * @param {string} botUsername
+ * @param {{cancelledByName?: string}} [opts] name shown in the cancelled note
  * @returns {View}
  */
-export function gameView(g, botUsername) {
+export function gameView(g, botUsername, opts = {}) {
   const lines = gameLines(g);
   if (g.status === 'settled') return { text: [...lines, '', '✅ Рассчитана'].join('\n') };
-  if (g.status === 'cancelled') return { text: [...lines, '', '❌ Игра отменена'].join('\n') };
+  if (g.status === 'cancelled') {
+    const by = opts.cancelledByName ? ` (${opts.cancelledByName})` : '';
+    return { text: [...lines, '', `❌ Игра отменена${by}`].join('\n') };
+  }
   const text = lines.join('\n');
   if (g.status === 'counting') {
     return {

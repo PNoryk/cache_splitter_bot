@@ -9,7 +9,7 @@
  * @typedef {{id:number, chatId:number, messageId:number|null,
  *   countMessageId:number|null, chipsPerBuyin:number, priceKop:number,
  *   status:'active'|'counting'|'settled'|'cancelled', createdBy:number,
- *   players:Player[], entries:Entry[], stacks:Stack[]}} GameSnapshot
+ *   cancelledBy:number|null, players:Player[], entries:Entry[], stacks:Stack[]}} GameSnapshot
  * players are in join order (id ASC); entries are id ASC.
  * @typedef {{from:number, to:number, kop:number}} Transfer
  */

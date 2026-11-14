@@ -95,6 +95,7 @@ export async function loadGame(db, gameId) {
     priceKop: g.price_kop,
     status: g.status,
     createdBy: g.created_by,
+    cancelledBy: g.cancelled_by ?? null,
     players: players.results.map((p) => ({
       id: p.id,
       tgUserId: p.tg_user_id,
@@ -260,6 +261,24 @@ export async function setStatus(db, gameId, fromStatuses, to) {
   const res = await db
     .prepare(`UPDATE games SET status = ? WHERE id = ? AND status IN (${marks})`)
     .bind(to, gameId, ...fromStatuses)
+    .run();
+  return res.meta.changes > 0;
+}
+
+/**
+ * Cancel an open game and record who did it; true if this call cancelled it.
+ * @param {any} db D1Database
+ * @param {number} gameId
+ * @param {number} byTgUserId
+ * @returns {Promise<boolean>}
+ */
+export async function cancelGame(db, gameId, byTgUserId) {
+  const res = await db
+    .prepare(
+      "UPDATE games SET status = 'cancelled', cancelled_by = ?"
+      + " WHERE id = ? AND status IN ('active', 'counting')",
+    )
+    .bind(byTgUserId, gameId)
     .run();
   return res.meta.changes > 0;
 }

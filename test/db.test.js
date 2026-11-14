@@ -4,7 +4,7 @@ import { createD1 } from './helpers/d1.js';
 import {
   markUpdate, findOpenGame, createGame, setMessageId, loadGame,
   findGameByCountMessage, findCountingGameForDm, addPlayer, addEntry,
-  cancelEntry, upsertStack, setStatus, setPrice,
+  cancelEntry, upsertStack, setStatus, setPrice, cancelGame,
 } from '../platform/db.js';
 
 const G = { chatId: -100, chipsPerBuyin: 1000, priceKop: 10000, createdBy: 1 };
@@ -14,7 +14,8 @@ test('create then load gives empty active snapshot', async () => {
   const id = await createGame(db, G);
   assert.deepEqual(await loadGame(db, id), {
     id, chatId: -100, messageId: null, countMessageId: null, chipsPerBuyin: 1000,
-    priceKop: 10000, status: 'active', createdBy: 1, players: [], entries: [], stacks: [],
+    priceKop: 10000, status: 'active', createdBy: 1, cancelledBy: null, players: [],
+    entries: [], stacks: [],
   });
   assert.equal(await loadGame(db, 999), null);
   assert.equal(await findOpenGame(db, -100), id);
@@ -148,4 +149,15 @@ test('addPlayer batch rolls back the player when the entry insert fails', async 
   };
   await assert.rejects(addPlayer(db, id, { tgUserId: 5, name: 'A', addedBy: 5 }));
   assert.equal((await loadGame(raw, id)).players.length, 0);
+});
+
+test('cancelGame cancels once and records who', async () => {
+  const db = createD1();
+  const id = await createGame(db, { chatId: -1, chipsPerBuyin: 1000, priceKop: 5000, createdBy: 1 });
+  assert.equal(await cancelGame(db, id, 7), true);
+  assert.equal(await cancelGame(db, id, 8), false);
+  const g = await loadGame(db, id);
+  assert.equal(g.status, 'cancelled');
+  assert.equal(g.cancelledBy, 7);
+  assert.equal((await loadGame(db, id)).cancelledBy, 7);
 });

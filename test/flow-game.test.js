@@ -185,14 +185,6 @@ test('buttons on a cancelled game answer and change nothing', async () => {
   assert.equal(of(w.api, 'editMessageText').length, 0);
 });
 
-test('unregistered callback only answers', async () => {
-  const w = world();
-  const id = await startGame(w);
-  w.api.calls.length = 0;
-  await handleUpdate(press(w.uid(), `${id}:cancel`, A), w.ctx);
-  assert.deepEqual(w.api.calls.map((c) => c.method), ['answerCallbackQuery']);
-});
-
 test('refresh falls back to a new message when edit target is gone', async () => {
   const w = world();
   const id = await startGame(w);

@@ -254,3 +254,9 @@ test('cb and parseCb round-trip', () => {
   assert.equal(parseCb('5:nope'), null);
   assert.equal(parseCb(''), null);
 });
+
+test('gameView cancelled note names the canceller when known', () => {
+  const g = makeGame({ status: 'cancelled' });
+  assert.ok(gameView(g, 'b', { cancelledByName: 'Аня' }).text.endsWith('❌ Игра отменена (Аня)'));
+  assert.ok(gameView(g, 'b').text.endsWith('❌ Игра отменена'));
+});

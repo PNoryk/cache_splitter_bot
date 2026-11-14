@@ -3,13 +3,14 @@
  */
 import {
   markUpdate, findOpenGame, createGame, setMessageId, loadGame, addPlayer, addEntry,
-  cancelEntry, setStatus, upsertStack, findGameByCountMessage, findCountingGameForDm,
+  cancelEntry, setStatus, cancelGame, setPrice, upsertStack, findGameByCountMessage, findCountingGameForDm,
 } from './db.js';
 import {
-  gameView, personalView, rebuyChooserView, countView, discrepancyView, resultView,
+  gameView, personalView, rebuyChooserView, countView, cancelConfirmView, discrepancyView, resultView,
   parseCb, ACTIONS,
 } from './views.js';
 import { TelegramError } from './telegram.js';
+import { formatKop } from '../core/money.js';
 import {
   parseGameArgs, rebuyTargets, undoTarget, settlement, discrepancyChips, missingStacks,
   parseStackInput, resolvePlayer, playerByTg,
@@ -28,6 +29,7 @@ const GUEST_PROMPT_PREFIX = 'Имя гостя для игры #';
 const COUNTING_TEXT = 'Идёт подсчёт — сначала «Вернуться в игру»';
 const ENDED_TEXT = 'Игра уже закончена';
 const NOT_IN_GAME = 'Ты не в игре';
+const PRICE_USAGE = 'Формат: /price 1000 50';
 const STACK_USAGE = 'Не понял. Число фишек, или «Имя число»';
 const GAME_HINT = 'Чтобы начать игру, напишите: /game 1000 50\n'
   + '(фишек в одном закупе и цена закупа)';
@@ -49,12 +51,13 @@ function displayName(user) {
  * Edit the game message to the fresh snapshot; if it vanished, send a new one.
  * @param {Ctx} ctx
  * @param {number} gameId
+ * @param {{cancelledByName?: string}} [opts] passed to gameView
  * @returns {Promise<void>}
  */
-export async function refreshGameMessage(ctx, gameId) {
+export async function refreshGameMessage(ctx, gameId, opts = {}) {
   const g = await loadGame(ctx.db, gameId);
   if (!g) return;
-  const view = gameView(g, ctx.botUsername);
+  const view = gameView(g, ctx.botUsername, opts);
   try {
     await ctx.api.call('editMessageText', {
       chat_id: g.chatId, message_id: g.messageId, ...view,
@@ -167,8 +170,40 @@ async function cmdStart(ctx, msg, args) {
   if (created) await refreshGameMessage(ctx, gameId);
 }
 
+/**
+ * Handle /price: change chips per buyin and the price of the open game.
+ * @param {Ctx} ctx
+ * @param {any} msg
+ * @param {string} args
+ * @returns {Promise<void>}
+ */
+async function cmdPrice(ctx, msg, args) {
+  const chatId = msg.chat.id;
+  if (msg.chat.type === 'private') return;
+  /**
+   * Send a plain text message to the chat.
+   * @param {string} text
+   * @returns {Promise<void>}
+   */
+  const say = async (text) => {
+    await ctx.api.call('sendMessage', { chat_id: chatId, text });
+  };
+  const gameId = await findOpenGame(ctx.db, chatId);
+  if (gameId === null) return say('Нет активной игры');
+  const parsed = parseGameArgs(args);
+  if (!parsed) return say(PRICE_USAGE);
+  await setPrice(ctx.db, gameId, parsed.chipsPerBuyin, parsed.priceKop);
+  await refreshGameMessage(ctx, gameId);
+  const g = /** @type {GameSnapshot} */ (await loadGame(ctx.db, gameId));
+  if (g.status === 'counting') await refreshCountMessage(ctx, g);
+  await say(
+    `${displayName(msg.from)} изменил: ${parsed.chipsPerBuyin} фишек`
+    + ` = ${formatKop(parsed.priceKop)}`,
+  );
+}
+
 /** @type {Record<string, (ctx: Ctx, msg: any, args: string) => Promise<void>>} */
-const COMMANDS = { game: cmdGame, start: cmdStart };
+const COMMANDS = { game: cmdGame, start: cmdStart, price: cmdPrice };
 
 /**
  * Handle a reply to the "guest name" prompt; true if the message was one.
@@ -482,6 +517,58 @@ const cbRounding = (round) => async ({ ctx, cq, g }) => {
 };
 
 /**
+ * Callback: ask for confirmation before cancelling.
+ * @param {CbCall} c
+ * @returns {Promise<void>}
+ */
+async function cbCancel({ ctx, cq, g }) {
+  await answer(ctx, cq);
+  await ctx.api.call('sendMessage', {
+    chat_id: cq.message.chat.id,
+    reply_to_message_id: cq.message.message_id,
+    ...cancelConfirmView(g),
+  });
+}
+
+/**
+ * Delete the pressed (confirmation) message, ignoring Telegram errors.
+ * @param {Ctx} ctx
+ * @param {any} cq
+ * @returns {Promise<void>}
+ */
+async function deletePressed(ctx, cq) {
+  try {
+    await ctx.api.call('deleteMessage', {
+      chat_id: cq.message.chat.id, message_id: cq.message.message_id,
+    });
+  } catch (e) {
+    if (!(e instanceof TelegramError)) throw e;
+  }
+}
+
+/**
+ * Callback: confirmed cancel; only the first press cancels.
+ * @param {CbCall} c
+ * @returns {Promise<void>}
+ */
+async function cbCancelYes({ ctx, cq, g }) {
+  if (!(await cancelGame(ctx.db, g.id, cq.from.id))) return answer(ctx, cq, ENDED_TEXT);
+  await answer(ctx, cq);
+  await deletePressed(ctx, cq);
+  await refreshGameMessage(ctx, g.id, { cancelledByName: displayName(cq.from) });
+}
+
+/**
+ * Callback: keep the game, drop the confirmation.
+ * @param {CbCall} c
+ * @returns {Promise<void>}
+ */
+async function cbCancelNo({ ctx, cq }) {
+  await answer(ctx, cq);
+  await deletePressed(ctx, cq);
+}
+
+/**
  * @typedef {{handler: (c: CbCall) => Promise<void>, statuses: string[]}} CbEntry
  */
 
@@ -501,6 +588,9 @@ const CALLBACKS = {
   [ACTIONS.zero]: { handler: cbZero, statuses: ['counting'] },
   [ACTIONS.fix]: { handler: rebuyFlow, statuses: ['counting'] },
   [ACTIONS.split]: { handler: cbSplit, statuses: ['counting'] },
+  [ACTIONS.cancel]: { handler: cbCancel, statuses: ['active', 'counting'] },
+  [ACTIONS.cancel_yes]: { handler: cbCancelYes, statuses: ['active', 'counting'] },
+  [ACTIONS.cancel_no]: { handler: cbCancelNo, statuses: ['active', 'counting'] },
   [ACTIONS.round]: { handler: cbRounding(true), statuses: ['settled'] },
   [ACTIONS.exact]: { handler: cbRounding(false), statuses: ['settled'] },
 };
