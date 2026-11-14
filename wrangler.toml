@@ -1,0 +1,12 @@
+name = "cash-splitter-bot"
+main = "platform/worker.js"
+compatibility_date = "2026-11-01"
+
+[vars]
+BOT_USERNAME = "cash_splitter_p_bot"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cash-splitter-bot"
+database_id = "c4226152-5ebb-41ea-8c53-d938f3ec9b91"
+migrations_dir = "migrations"
