@@ -8,6 +8,7 @@ import {
   investedKop,
   buyinsOf,
   activeEntries,
+  activePlayers,
   discrepancyChips,
 } from '../core/game.js';
 
@@ -36,6 +37,7 @@ export const ACTIONS = Object.freeze({
   split: 'split',
   round: 'round',
   exact: 'exact',
+  result: 'result',
 });
 
 const KNOWN_ACTIONS = new Set(Object.values(ACTIONS));
@@ -97,13 +99,13 @@ function header(g) {
 }
 
 /**
- * Header, player lines, bank and recent third-party rebuys.
+ * Header, lines of players in the game, bank and recent third-party rebuys.
  * @param {GameSnapshot} g
  * @returns {string[]}
  */
 function gameLines(g) {
   const lines = [header(g), ''];
-  for (const p of g.players) {
+  for (const p of activePlayers(g)) {
     const mark = p.tgUserId === null ? '👤 ' : '';
     const money = formatKop(investedKop(g, p.id));
     lines.push(`${mark}${p.name} · ${buyinsWord(buyinsOf(g, p.id))} · ${money}`);
@@ -135,7 +137,14 @@ function gameLines(g) {
  */
 export function gameView(g, botUsername, opts = {}) {
   const lines = gameLines(g);
-  if (g.status === 'settled') return { text: [...lines, '', '✅ Рассчитана'].join('\n') };
+  if (g.status === 'settled') {
+    return {
+      text: [...lines, '', '✅ Рассчитана'].join('\n'),
+      reply_markup: {
+        inline_keyboard: [[{ text: 'Итог', callback_data: cb(g.id, ACTIONS.result) }]],
+      },
+    };
+  }
   if (g.status === 'cancelled') {
     const by = opts.cancelledByName ? ` (${opts.cancelledByName})` : '';
     return { text: [...lines, '', `❌ Игра отменена${by}`].join('\n') };
@@ -215,11 +224,11 @@ export function rebuyChooserView(g, targets) {
 export function countView(g) {
   const lines = [
     '🧮 Подсчёт',
-    'Пришлите, сколько у вас фишек, одним числом.',
-    'За гостя или другого игрока: имя и число, например «Дима 500».',
+    'Ответьте на это сообщение числом фишек.',
+    'За гостя или другого игрока: «Дима 500».',
     '',
   ];
-  for (const p of g.players) {
+  for (const p of activePlayers(g)) {
     const s = g.stacks.find((x) => x.playerId === p.id);
     if (!s) {
       lines.push(`${p.name}  —`);

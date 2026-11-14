@@ -78,10 +78,10 @@ test('gameView lists only last 5 rebuys made for others', () => {
   assert.equal(v.text.split('→ докуп').length - 1, 5);
 });
 
-test('gameView for settled and cancelled has a note and no keyboard', () => {
+test('gameView: settled has a note and the result button, cancelled no keyboard', () => {
   const s = gameView(makeGame({ status: 'settled' }), 'b');
   assert.ok(s.text.includes('✅ Рассчитана'));
-  assert.equal(s.reply_markup, undefined);
+  assert.deepEqual(s.reply_markup.inline_keyboard, [[{ text: 'Итог', callback_data: '12:result' }]]);
   const c = gameView(makeGame({ status: 'cancelled' }), 'b');
   assert.ok(c.text.includes('❌ Игра отменена'));
   assert.equal(c.reply_markup, undefined);
@@ -113,7 +113,7 @@ test('plural of buyins', () => {
   assert.ok(mk(5).includes('5 закупов'));
   assert.ok(mk(11).includes('11 закупов'));
   assert.ok(mk(22).includes('22 закупа'));
-  assert.ok(mk(0).includes('0 закупов'));
+  assert.ok(!mk(0).includes('А ·'));
 });
 
 test('personalView has rebuy and undo buttons', () => {
@@ -144,6 +144,11 @@ test('countView shows stacks, entered-by and missing', () => {
     ],
   });
   const v = countView(g);
+  assert.deepEqual(v.text.split('\n').slice(0, 3), [
+    '🧮 Подсчёт',
+    'Ответьте на это сообщение числом фишек.',
+    'За гостя или другого игрока: «Дима 500».',
+  ]);
   assert.ok(v.text.includes('Паша  1370 ✓'));
   assert.ok(v.text.includes('Вася  —'));
   assert.ok(v.text.includes('Дима 500 (ввёл Паша)'));
@@ -225,6 +230,7 @@ test('all callback_data fit 64 bytes and use known actions', () => {
   };
   const views = [
     gameView(g, 'bot'),
+    gameView({ ...g, status: 'settled' }, 'bot'),
     personalView(g),
     rebuyChooserView(g, g.players),
     countView(g),
@@ -259,4 +265,13 @@ test('gameView cancelled note names the canceller when known', () => {
   const g = makeGame({ status: 'cancelled' });
   assert.ok(gameView(g, 'b', { cancelledByName: 'Аня' }).text.endsWith('❌ Игра отменена (Аня)'));
   assert.ok(gameView(g, 'b').text.endsWith('❌ Игра отменена'));
+});
+
+test('players with no active entries are left out of game, personal and count lists', () => {
+  const g = makeGame({ status: 'counting' });
+  g.entries = g.entries.map((e) => (e.playerId === 3 ? { ...e, cancelled: true } : e));
+  for (const v of [gameView(g, 'b'), personalView(g), countView(g)]) {
+    assert.ok(!v.text.split('\n').some((l) => /^(👤 )?Дима /.test(l)), v.text);
+    assert.ok(v.text.includes('Паша'));
+  }
 });

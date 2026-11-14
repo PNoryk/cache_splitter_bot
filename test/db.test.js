@@ -84,8 +84,9 @@ test('upsertStack keeps one row with latest value', async () => {
   const db = createD1();
   const id = await createGame(db, G);
   const { playerId } = await addPlayer(db, id, { tgUserId: 5, name: 'A', addedBy: 5 });
-  await upsertStack(db, id, playerId, 500, 5);
-  await upsertStack(db, id, playerId, 700, 6);
+  await setStatus(db, id, ['active'], 'counting');
+  assert.equal(await upsertStack(db, id, playerId, 500, 5), true);
+  assert.equal(await upsertStack(db, id, playerId, 700, 6), true);
   assert.deepEqual((await loadGame(db, id)).stacks, [{ playerId, chips: 700, enteredBy: 6 }]);
 });
 
@@ -94,7 +95,7 @@ test('message ids, price, count lookups', async () => {
   const id = await createGame(db, G);
   await setMessageId(db, id, 'message_id', 11);
   await setMessageId(db, id, 'count_message_id', 22);
-  await setPrice(db, id, 500, 2500);
+  assert.equal(await setPrice(db, id, 500, 2500), true);
   const g = await loadGame(db, id);
   assert.equal(g.messageId, 11);
   assert.equal(g.countMessageId, 22);
@@ -160,4 +161,36 @@ test('cancelGame cancels once and records who', async () => {
   assert.equal(g.status, 'cancelled');
   assert.equal(g.cancelledBy, 7);
   assert.equal((await loadGame(db, id)).cancelledBy, 7);
+});
+
+test('upsertStack writes only while counting', async () => {
+  const db = createD1();
+  const id = await createGame(db, G);
+  const { playerId } = await addPlayer(db, id, { tgUserId: 5, name: 'A', addedBy: 5 });
+  assert.equal(await upsertStack(db, id, playerId, 500, 5), false);
+  await setStatus(db, id, ['active'], 'counting');
+  assert.equal(await upsertStack(db, id, playerId, 500, 5), true);
+  await setStatus(db, id, ['counting'], 'settled');
+  assert.equal(await upsertStack(db, id, playerId, 900, 5), false);
+  assert.deepEqual((await loadGame(db, id)).stacks, [{ playerId, chips: 500, enteredBy: 5 }]);
+});
+
+test('addEntry and setPrice write only while active or counting', async () => {
+  const db = createD1();
+  const id = await createGame(db, G);
+  const { playerId } = await addPlayer(db, id, { tgUserId: 5, name: 'A', addedBy: 5 });
+  assert.equal(await addEntry(db, id, playerId, 'rebuy', 5), true);
+  await setStatus(db, id, ['active'], 'counting');
+  assert.equal(await addEntry(db, id, playerId, 'rebuy', 5), true);
+  assert.equal(await setPrice(db, id, 500, 100), true);
+  await setStatus(db, id, ['counting'], 'settled');
+  assert.equal(await addEntry(db, id, playerId, 'rebuy', 5), false);
+  assert.equal(await setPrice(db, id, 2000, 9900), false);
+  const g = await loadGame(db, id);
+  assert.equal(g.entries.length, 3);
+  assert.deepEqual([g.chipsPerBuyin, g.priceKop], [500, 100]);
+  const other = await createGame(db, { ...G, chatId: -7 });
+  await cancelGame(db, other, 1);
+  assert.equal(await addEntry(db, other, playerId, 'buyin', 5), false);
+  assert.equal(await setPrice(db, other, 1, 1), false);
 });

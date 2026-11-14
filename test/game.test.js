@@ -15,6 +15,9 @@ import {
   playerByTg,
   undoTarget,
   activeEntries,
+  activePlayers,
+  MAX_CHIPS,
+  MAX_PRICE_KOP,
 } from '../core/game.js';
 
 /**
@@ -187,7 +190,9 @@ test('parseStackInput', () => {
 test('resolvePlayer', () => {
   const mk = (names) => names.map((name, i) => ({ id: i, tgUserId: null, name, addedBy: 1 }));
   assert.equal(resolvePlayer(mk(['Вася']), 'вася').player.name, 'Вася');
-  assert.deepEqual(resolvePlayer(mk(['Вася', 'Валера']), 'Ва'), { error: 'ambiguous' });
+  const amb = resolvePlayer(mk(['Вася', 'Валера', 'Петя']), 'Ва');
+  assert.equal(amb.error, 'ambiguous');
+  assert.deepEqual(amb.candidates.map((p) => p.name), ['Вася', 'Валера']);
   assert.deepEqual(resolvePlayer(mk(['Вася']), 'Петя'), { error: 'not_found' });
   assert.equal(resolvePlayer(mk(['Саша', 'Сашок']), 'Саша').player.name, 'Саша');
 });
@@ -196,6 +201,7 @@ test('rebuyTargets and playerByTg', () => {
   const g = makeGame({ players: ['A'] });
   assert.deepEqual(rebuyTargets(g, 100).map((p) => p.name), ['A']);
   g.players.push({ id: 2, tgUserId: null, name: 'Гость', addedBy: 100 });
+  g.entries.push({ id: 9, playerId: 2, kind: 'buyin', createdBy: 100, cancelled: false });
   assert.deepEqual(rebuyTargets(g, 100).map((p) => p.name), ['A', 'Гость']);
   assert.deepEqual(rebuyTargets(g, 555).map((p) => p.name), ['Гость']);
   assert.equal(playerByTg(g, 100).name, 'A');
@@ -210,4 +216,47 @@ test('undoTarget', () => {
   assert.equal(undoTarget(g, 100).id, 2);
   assert.equal(undoTarget(g, 101).id, 4);
   assert.equal(undoTarget(g, 999), null);
+});
+
+test('resolvePlayer: unique exact match wins, duplicate exact names are ambiguous', () => {
+  const mk = (names) => names.map((name, i) => ({ id: i, tgUserId: null, name, addedBy: 1 }));
+  assert.equal(resolvePlayer(mk(['Дима', 'Димон']), ' дима ').player.name, 'Дима');
+  const dup = resolvePlayer(mk(['Дима', 'дима', 'Димон']), 'Дима');
+  assert.equal(dup.error, 'ambiguous');
+  assert.deepEqual(dup.candidates.map((p) => p.id), [0, 1]);
+});
+
+test('input caps: stacks up to 1e9 chips, buyin up to 1e9 chips and 1e6 rub', () => {
+  assert.equal(MAX_CHIPS, 1_000_000_000);
+  assert.equal(MAX_PRICE_KOP, 100_000_000);
+  assert.deepEqual(parseStackInput('1000000000'), { name: null, chips: 1_000_000_000 });
+  assert.equal(parseStackInput('1000000001'), null);
+  assert.equal(parseStackInput('Вася 99999999999'), null);
+  assert.deepEqual(parseGameArgs('1000000000 1000000'), {
+    chipsPerBuyin: 1_000_000_000, priceKop: 100_000_000,
+  });
+  assert.equal(parseGameArgs('1000000001 50'), null);
+  assert.equal(parseGameArgs('1000 1000000,01'), null);
+});
+
+test('a player whose only buyin was undone is out of the game', () => {
+  const g = makeGame({ players: ['A', 'B', 'C'], stacks: { A: 1500, B: 500 } });
+  g.entries.find((e) => e.playerId === 3).cancelled = true;
+  assert.deepEqual(activePlayers(g).map((p) => p.name), ['A', 'B']);
+  assert.deepEqual(missingStacks(g), []);
+  assert.equal(discrepancyChips(g), 0);
+  const s = settlement(g, { split: false, round: false });
+  assert.deepEqual(s.balances, [2500, -2500]);
+  assert.deepEqual(s.transfers, [{ from: 2, to: 1, kop: 2500 }]);
+  assert.deepEqual(balances(g, { split: true }), [2500, -2500]);
+  assert.deepEqual(rebuyTargets(g, 102), []);
+  assert.equal(playerByTg(g, 102), undefined);
+  assert.equal(playerByTg(g, 100).name, 'A');
+});
+
+test('a stack left by a player who later went out is ignored', () => {
+  const g = makeGame({ players: ['A', 'B', 'C'], stacks: { A: 1000, B: 1000, C: 700 } });
+  g.entries.find((e) => e.playerId === 3).cancelled = true;
+  assert.equal(discrepancyChips(g), 0);
+  assert.deepEqual(settlement(g, { split: false, round: false }).transfers, []);
 });

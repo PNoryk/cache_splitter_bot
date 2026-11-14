@@ -194,21 +194,24 @@ export async function addPlayer(db, gameId, { tgUserId, name, addedBy }) {
 }
 
 /**
- * Add a buyin/rebuy entry.
+ * Add a buyin/rebuy entry while the game is active or counting.
  * @param {any} db D1Database
  * @param {number} gameId
  * @param {number} playerId
  * @param {'buyin' | 'rebuy'} kind
  * @param {number} createdBy
- * @returns {Promise<void>}
+ * @returns {Promise<boolean>} false if the game is no longer open
  */
 export async function addEntry(db, gameId, playerId, kind, createdBy) {
-  await db
+  const res = await db
     .prepare(
-      "INSERT INTO entries (game_id, player_id, kind, created_by) VALUES (?, ?, ?, ?)",
+      "INSERT INTO entries (game_id, player_id, kind, created_by) SELECT ?, ?, ?, ?"
+      + " WHERE EXISTS (SELECT 1 FROM games WHERE id = ?"
+      + " AND status IN ('active', 'counting'))",
     )
-    .bind(gameId, playerId, kind, createdBy)
+    .bind(gameId, playerId, kind, createdBy, gameId)
     .run();
+  return res.meta.changes > 0;
 }
 
 /**
@@ -228,24 +231,26 @@ export async function cancelEntry(db, entryId) {
 }
 
 /**
- * Insert or replace a player's final stack.
+ * Insert or replace a player's final stack while the game is counting.
  * @param {any} db D1Database
  * @param {number} gameId
  * @param {number} playerId
  * @param {number} chips
  * @param {number} enteredBy
- * @returns {Promise<void>}
+ * @returns {Promise<boolean>} false if the game is not counting
  */
 export async function upsertStack(db, gameId, playerId, chips, enteredBy) {
-  await db
+  const res = await db
     .prepare(
-      "INSERT INTO stacks (game_id, player_id, chips, entered_by) VALUES (?, ?, ?, ?)"
+      "INSERT INTO stacks (game_id, player_id, chips, entered_by) SELECT ?, ?, ?, ?"
+      + " WHERE EXISTS (SELECT 1 FROM games WHERE id = ? AND status = 'counting')"
       + " ON CONFLICT (game_id, player_id) DO UPDATE SET"
       + " chips = excluded.chips, entered_by = excluded.entered_by,"
       + " updated_at = unixepoch()",
     )
-    .bind(gameId, playerId, chips, enteredBy)
+    .bind(gameId, playerId, chips, enteredBy, gameId)
     .run();
+  return res.meta.changes > 0;
 }
 
 /**
@@ -284,16 +289,20 @@ export async function cancelGame(db, gameId, byTgUserId) {
 }
 
 /**
- * Change buyin size and price.
+ * Change buyin size and price of an active or counting game.
  * @param {any} db D1Database
  * @param {number} gameId
  * @param {number} chipsPerBuyin
  * @param {number} priceKop
- * @returns {Promise<void>}
+ * @returns {Promise<boolean>} false if the game is no longer open
  */
 export async function setPrice(db, gameId, chipsPerBuyin, priceKop) {
-  await db
-    .prepare('UPDATE games SET chips_per_buyin = ?, price_kop = ? WHERE id = ?')
+  const res = await db
+    .prepare(
+      'UPDATE games SET chips_per_buyin = ?, price_kop = ?'
+      + " WHERE id = ? AND status IN ('active', 'counting')",
+    )
     .bind(chipsPerBuyin, priceKop, gameId)
     .run();
+  return res.meta.changes > 0;
 }
